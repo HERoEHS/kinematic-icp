@@ -26,6 +26,17 @@ if(CMAKE_VERSION VERSION_GREATER 3.24)
 endif()
 
 include(FetchContent)
-FetchContent_Declare(kiss_icp URL https://github.com/PRBonn/kiss-icp/archive/refs/tags/v1.2.0.tar.gz SOURCE_SUBDIR
-                                  cpp/kiss_icp)
+# ALICE M2: build offline from the tarballs vendored in ../3rdparty (the robot
+# has no guaranteed internet access). The first FetchContent_Declare() of a
+# name wins, so Sophus and robin-map are declared here, ahead of the
+# declarations inside kiss_icp's own 3rdparty scripts, with the same version,
+# options and patch those scripts use. Eigen3 and TBB come from the system.
+set(KINEMATIC_ICP_VENDOR_DIR ${CMAKE_CURRENT_LIST_DIR}/../3rdparty)
+set(SOPHUS_USE_BASIC_LOGGING ON CACHE BOOL "Don't use fmt for Sophus libraru")
+set(BUILD_SOPHUS_TESTS OFF CACHE BOOL "Don't build Sophus tests")
+set(BUILD_SOPHUS_EXAMPLES OFF CACHE BOOL "Don't build Sophus Examples")
+FetchContent_Declare(sophus SYSTEM URL ${KINEMATIC_ICP_VENDOR_DIR}/sophus-1.22.10.tar.gz
+                     PATCH_COMMAND patch -p1 < ${KINEMATIC_ICP_VENDOR_DIR}/sophus.patch UPDATE_DISCONNECTED 1)
+FetchContent_Declare(tessil SYSTEM URL ${KINEMATIC_ICP_VENDOR_DIR}/robin-map-1.2.1.tar.gz)
+FetchContent_Declare(kiss_icp URL ${KINEMATIC_ICP_VENDOR_DIR}/kiss-icp-1.2.0.tar.gz SOURCE_SUBDIR cpp/kiss_icp)
 FetchContent_MakeAvailable(kiss_icp)

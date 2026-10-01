@@ -70,6 +70,12 @@ ament_target_dependencies(kinematic_icp_ros ${dependencies})
 add_executable(kinematic_icp_offline_node src/kinematic_icp_ros/nodes/offline_node.cpp)
 target_link_libraries(kinematic_icp_offline_node PUBLIC kinematic_icp_ros)
 
+# ALICE M2: synthetic holonomic-motion check of the core pipeline (no ROS).
+add_executable(kinematic_icp_planar_check tools/planar_check.cpp)
+target_compile_features(kinematic_icp_planar_check PUBLIC cxx_std_17)
+target_link_libraries(kinematic_icp_planar_check PUBLIC kinematic_icp_pipeline)
+install(TARGETS kinematic_icp_planar_check RUNTIME DESTINATION lib/${PROJECT_NAME})
+
 rclcpp_components_register_node(kinematic_icp_ros PLUGIN "kinematic_icp_ros::OnlineNode" EXECUTABLE
                                 kinematic_icp_online_node)
 

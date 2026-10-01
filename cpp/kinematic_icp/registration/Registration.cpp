@@ -30,6 +30,7 @@
 #include <tbb/parallel_reduce.h>
 #include <tbb/task_arena.h>
 
+#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
 #include <kiss_icp/core/VoxelHashMap.hpp>
@@ -125,6 +126,95 @@ Eigen::Vector2d ComputePerturbation(const Correspondences &correspondences,
     return -(JTJ.inverse() * JTr);
 }
 
+// Holonomic (x, y, yaw) counterpart of the normal equations above, normalized by
+// the number of correspondences the same way. The perturbation is applied on the
+// right, T * exp(dx, dy, 0, 0, 0, dyaw), so the Jacobian columns are the body x
+// and y axes and the yaw lever arm of each source point, all rotated into the
+// map frame - the same convention as the two-parameter version. A match with a
+// normal (robot frame) contributes the scalar residual n . (T s - t) instead.
+struct Match {
+    Eigen::Vector3d source, target, normal;  // normal zero: point-to-point
+};
+using Matches = tbb::concurrent_vector<Match>;
+using LinearSystem3 = std::pair<Eigen::Matrix3d, Eigen::Vector3d>;
+
+Matches AssociateWithNormals(const std::vector<Eigen::Vector3d> &points,
+                             const std::vector<Eigen::Vector3d> &normals,
+                             const kiss_icp::VoxelHashMap &voxel_map,
+                             const Sophus::SE3d &T,
+                             const double max_correspondance_distance) {
+    Matches matches;
+    matches.reserve(points.size());
+    tbb::parallel_for(tbb::blocked_range<std::size_t>{0, points.size()},
+                      [&](const tbb::blocked_range<std::size_t> &r) {
+                          for (std::size_t i = r.begin(); i < r.end(); ++i) {
+                              const auto &[closest_neighbor, distance] =
+                                  voxel_map.GetClosestNeighbor(T * points[i]);
+                              if (distance < max_correspondance_distance) {
+                                  matches.push_back({points[i], closest_neighbor,
+                                                     normals.empty() ? Eigen::Vector3d::Zero()
+                                                                     : normals[i]});
+                              }
+                          }
+                      });
+    return matches;
+}
+
+struct MatchSystem {
+    LinearSystem3 system{Eigen::Matrix3d::Zero(), Eigen::Vector3d::Zero()};
+    double sum_squared_residual = 0.0;
+    std::size_t used = 0, point_to_line = 0;
+};
+
+MatchSystem BuildLinearSystem3(const Matches &matches,
+                               const Sophus::SE3d &T,
+                               const double point_to_point_weight) {
+    const Eigen::Matrix3d R = T.so3().matrix();
+    auto reduce = [](MatchSystem a, const MatchSystem &b) {
+        a.system.first += b.system.first;
+        a.system.second += b.system.second;
+        a.sum_squared_residual += b.sum_squared_residual;
+        a.used += b.used;
+        a.point_to_line += b.point_to_line;
+        return a;
+    };
+    MatchSystem out = tbb::parallel_reduce(
+        tbb::blocked_range<Matches::const_iterator>{matches.cbegin(), matches.cend()},
+        MatchSystem{},
+        [&](const tbb::blocked_range<Matches::const_iterator> &r, MatchSystem acc) -> MatchSystem {
+            for (auto it = r.begin(); it != r.end(); ++it) {
+                const Eigen::Vector3d &s = it->source;
+                Eigen::Matrix3d J;
+                J.col(0) = R * Eigen::Vector3d::UnitX();
+                J.col(1) = R * Eigen::Vector3d::UnitY();
+                J.col(2) = R * Eigen::Vector3d(-s.y(), s.x(), 0.0);
+                const Eigen::Vector3d residual = T * s - it->target;
+                if (it->normal.squaredNorm() > 0.5) {
+                    const Eigen::Vector3d n = R * it->normal;
+                    const Eigen::RowVector3d Jn = n.transpose() * J;
+                    const double rn = n.dot(residual);
+                    acc.system.first += Jn.transpose() * Jn;
+                    acc.system.second += Jn.transpose() * rn;
+                    acc.sum_squared_residual += rn * rn;
+                    ++acc.used;
+                    ++acc.point_to_line;
+                } else if (point_to_point_weight > 0.0) {
+                    acc.system.first += point_to_point_weight * (J.transpose() * J);
+                    acc.system.second += point_to_point_weight * (J.transpose() * residual);
+                    acc.sum_squared_residual += residual.squaredNorm();
+                    ++acc.used;
+                }
+            }
+            return acc;
+        },
+        reduce);
+    if (out.used > 0) {
+        out.system.first /= static_cast<double>(out.used);
+        out.system.second /= static_cast<double>(out.used);
+    }
+    return out;
+}
+
 }  // namespace
 
 namespace kinematic_icp {
@@ -133,7 +223,8 @@ KinematicRegistration::KinematicRegistration(const int max_num_iteration,
                                              const double convergence_criterion,
                                              const int max_num_threads,
                                              const bool use_adaptive_odometry_regularization,
-                                             const double fixed_regularization)
+                                             const double fixed_regularization,
+                                             const HolonomicOptions &holonomic)
     : max_num_iterations_(max_num_iteration),
       convergence_criterion_(convergence_criterion),
       // Only manipulate the number of threads if the user specifies something
@@ -141,7 +232,9 @@ KinematicRegistration::KinematicRegistration(const int max_num_iteration,
       max_num_threads_(max_num_threads > 0 ? max_num_threads
                                            : tbb::this_task_arena::max_concurrency()),
       use_adaptive_odometry_regularization_(use_adaptive_odometry_regularization),
-      fixed_regularization_(fixed_regularization) {
+      fixed_regularization_(fixed_regularization),
+      holonomic_(holonomic) {
+    holonomic_.damping_weights = holonomic_.damping_weights.cwiseMax(0.0);
     // This global variable requires static duration storage to be able to
     // manipulate the max concurrency from TBB across the entire class
     static const auto tbb_control_settings = tbb::global_control(
@@ -149,12 +242,86 @@ KinematicRegistration::KinematicRegistration(const int max_num_iteration,
 }
 
 Sophus::SE3d KinematicRegistration::ComputeRobotMotion(const std::vector<Eigen::Vector3d> &frame,
+                                                       const std::vector<Eigen::Vector3d> &normals,
                                                        const kiss_icp::VoxelHashMap &voxel_map,
                                                        const Sophus::SE3d &last_robot_pose,
                                                        const Sophus::SE3d &relative_wheel_odometry,
                                                        const double max_correspondence_distance) {
     Sophus::SE3d current_estimate = last_robot_pose * relative_wheel_odometry;
+    diagnostics_ = RegistrationDiagnostics{};
     if (voxel_map.Empty()) return current_estimate;
+
+    if (holonomic_.enabled) {
+        const Sophus::SE3d prior_pose = current_estimate;
+        const std::vector<Eigen::Vector3d> no_normals;
+        const auto &match_normals = holonomic_.point_to_line ? normals : no_normals;
+        // Point-to-point matches always count; with point_to_line, points without
+        // a normal count only through point_to_point_weight.
+        const double p2p_weight =
+            (holonomic_.point_to_line && !match_normals.empty()) ? holonomic_.point_to_point_weight
+                                                                  : 1.0;
+        auto matches = AssociateWithNormals(frame, match_normals, voxel_map, current_estimate,
+                                            max_correspondence_distance);
+        if (matches.empty()) return current_estimate;
+
+        // Odometry term, see HolonomicOptions.
+        Eigen::Vector3d inv_prior_var = Eigen::Vector3d::Zero();
+        double beta = 0.0;
+        if (holonomic_.odometry_prior) {
+            const Sophus::SE3d::Tangent d = relative_wheel_odometry.log();
+            const Eigen::Vector3d sigma(
+                holonomic_.prior_sigma_xy_floor + holonomic_.prior_sigma_xy_rel * std::abs(d(0)),
+                holonomic_.prior_sigma_xy_floor + holonomic_.prior_sigma_xy_rel * std::abs(d(1)),
+                holonomic_.prior_sigma_yaw_floor + holonomic_.prior_sigma_yaw_rel * std::abs(d(5)));
+            inv_prior_var = sigma.cwiseMax(1e-9).cwiseAbs2().cwiseInverse();
+        } else if (use_adaptive_odometry_regularization_) {
+            // Upstream's beta: inverse mean squared point residual at the prior.
+            double sum = 0.0;
+            for (const auto &m : matches) sum += (current_estimate * m.source - m.target).squaredNorm();
+            beta = 1.0 / (sum / static_cast<double>(matches.size()) + epsilon);
+        } else {
+            beta = fixed_regularization_;
+        }
+        auto omega_diagonal = [&](const std::size_t n) -> Eigen::Vector3d {
+            if (!holonomic_.odometry_prior) return beta * holonomic_.damping_weights;
+            const double point_var = holonomic_.point_sigma * holonomic_.point_sigma;
+            return (point_var / static_cast<double>(std::max<std::size_t>(n, 1))) * inv_prior_var;
+        };
+        auto deviation_from_prior = [&](const Sophus::SE3d &T) -> Eigen::Vector3d {
+            const Sophus::SE3d::Tangent e = (prior_pose.inverse() * T).log();
+            return Eigen::Vector3d(e(0), e(1), e(5));
+        };
+
+        Eigen::Matrix3d Omega = Eigen::Matrix3d::Zero();
+        for (int j = 0; j < max_num_iterations_; ++j) {
+            const MatchSystem ms = BuildLinearSystem3(matches, current_estimate, p2p_weight);
+            if (ms.used == 0) break;
+            const auto &[JTJ, JTr] = ms.system;
+            Omega = omega_diagonal(ms.used).asDiagonal();
+            Eigen::Vector3d rhs = JTr;
+            if (holonomic_.odometry_prior) rhs += Omega * deviation_from_prior(current_estimate);
+            const Eigen::Vector3d dx = -(JTJ + Omega).ldlt().solve(rhs);
+            if (!dx.allFinite()) break;
+            Sophus::SE3d::Tangent xi = Sophus::SE3d::Tangent::Zero();
+            xi(0) = dx(0);
+            xi(1) = dx(1);
+            xi(5) = dx(2);
+            current_estimate = current_estimate * Sophus::SE3d::exp(xi);
+            if (dx.norm() < convergence_criterion_) break;
+            matches = AssociateWithNormals(frame, match_normals, voxel_map, current_estimate,
+                                           max_correspondence_distance);
+            if (matches.empty()) break;
+        }
+        const MatchSystem ms = BuildLinearSystem3(matches, current_estimate, p2p_weight);
+        Omega = omega_diagonal(ms.used).asDiagonal();
+        diagnostics_.information = ms.system.first + Omega;
+        diagnostics_.mean_squared_residual =
+            ms.used > 0 ? ms.sum_squared_residual / static_cast<double>(ms.used) : 0.0;
+        diagnostics_.num_correspondences = ms.used;
+        diagnostics_.num_point_to_line = ms.point_to_line;
+        diagnostics_.omega_diagonal = Omega.diagonal();
+        return current_estimate;
+    }
 
     auto motion_model = [](const Eigen::Vector2d &integrated_controls) {
         Sophus::SE3d::Tangent dx = Sophus::SE3d::Tangent::Zero();
@@ -188,4 +355,38 @@ Sophus::SE3d KinematicRegistration::ComputeRobotMotion(const std::vector<Eigen::
     // Spit the final transformation
     return current_estimate;
 }
+
+std::vector<Eigen::Vector3d> KinematicRegistration::EstimateNormals(
+    const std::vector<Eigen::Vector3d> &points, const std::vector<Eigen::Vector3d> &cloud) const {
+    std::vector<Eigen::Vector3d> normals(points.size(), Eigen::Vector3d::Zero());
+    const double r2 = holonomic_.normal_radius * holonomic_.normal_radius;
+    tbb::parallel_for(tbb::blocked_range<std::size_t>{0, points.size()},
+                      [&](const tbb::blocked_range<std::size_t> &r) {
+                          for (std::size_t i = r.begin(); i < r.end(); ++i) {
+                              const Eigen::Vector2d p = points[i].head<2>();
+                              Eigen::Vector2d sum = Eigen::Vector2d::Zero();
+                              Eigen::Matrix2d sum_sq = Eigen::Matrix2d::Zero();
+                              int count = 0;
+                              for (const auto &c : cloud) {
+                                  const Eigen::Vector2d q = c.head<2>();
+                                  if ((q - p).squaredNorm() > r2) continue;
+                                  sum += q;
+                                  sum_sq += q * q.transpose();
+                                  ++count;
+                              }
+                              if (count < holonomic_.normal_min_points) continue;
+                              const Eigen::Vector2d mean = sum / count;
+                              const Eigen::Matrix2d cov = sum_sq / count - mean * mean.transpose();
+                              const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> es(cov);
+                              const double l_min = es.eigenvalues()(0), l_max = es.eigenvalues()(1);
+                              if (!(l_max > 1e-12) || l_min / l_max > holonomic_.normal_max_eigen_ratio) {
+                                  continue;
+                              }
+                              const Eigen::Vector2d n = es.eigenvectors().col(0).normalized();
+                              normals[i] = Eigen::Vector3d(n.x(), n.y(), 0.0);
+                          }
+                      });
+    return normals;
+}
+
 }  // namespace kinematic_icp

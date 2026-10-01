@@ -49,12 +49,13 @@ KinematicICP::Vector3dVectorTuple KinematicICP::RegisterFrame(
     const std::vector<Eigen::Vector3d> &frame,
     const std::vector<double> &timestamps,
     const Sophus::SE3d &lidar_to_base,
-    const Sophus::SE3d &relative_odometry) {
+    const Sophus::SE3d &relative_odometry,
+    const Sophus::SE3d &deskew_motion) {
     // Need to deskew in lidar frame
-    const Sophus::SE3d &relative_odometry_in_lidar =
-        lidar_to_base.inverse() * relative_odometry * lidar_to_base;
+    const Sophus::SE3d &deskew_motion_in_lidar =
+        lidar_to_base.inverse() * deskew_motion * lidar_to_base;
     const auto &preprocessed_frame =
-        preprocessor_.Preprocess(frame, timestamps, relative_odometry_in_lidar);
+        preprocessor_.Preprocess(frame, timestamps, deskew_motion_in_lidar);
     // Give the frame in base frame
     const auto &preprocessed_frame_in_base = transform_points(preprocessed_frame, lidar_to_base);
     // Voxelize
@@ -65,7 +66,14 @@ KinematicICP::Vector3dVectorTuple KinematicICP::RegisterFrame(
     const double tau = correspondence_threshold_.ComputeThreshold();
 
     // Run ICP
+    // Holonomic point-to-line: normals of the registration points from the full
+    // deskewed frame (robot frame).
+    const std::vector<Eigen::Vector3d> normals =
+        (config_.holonomic && config_.point_to_line)
+            ? registration_.EstimateNormals(source, preprocessed_frame_in_base)
+            : std::vector<Eigen::Vector3d>{};
     const auto new_pose = registration_.ComputeRobotMotion(source,             // frame
+                                                           normals,            // normals
                                                            local_map_,         // voxel_map
                                                            last_pose_,         // last_pose
                                                            relative_odometry,  // robot_motion
