@@ -109,8 +109,11 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
     config.point_sigma = node->declare_parameter<double>("point_sigma", config.point_sigma);
     config.prior_sigma_xy_floor =
         node->declare_parameter<double>("prior_sigma_xy_floor", config.prior_sigma_xy_floor);
-    config.prior_sigma_xy_rel =
-        node->declare_parameter<double>("prior_sigma_xy_rel", config.prior_sigma_xy_rel);
+    // prior_sigma_xy_rel (older configs) sets both axes unless they are given.
+    const double prior_sigma_xy_rel =
+        node->declare_parameter<double>("prior_sigma_xy_rel", config.prior_sigma_x_rel);
+    config.prior_sigma_x_rel = node->declare_parameter<double>("prior_sigma_x_rel", prior_sigma_xy_rel);
+    config.prior_sigma_y_rel = node->declare_parameter<double>("prior_sigma_y_rel", prior_sigma_xy_rel);
     config.prior_sigma_yaw_floor =
         node->declare_parameter<double>("prior_sigma_yaw_floor", config.prior_sigma_yaw_floor);
     config.prior_sigma_yaw_rel =
@@ -123,6 +126,33 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
         node->declare_parameter<double>("normal_max_eigen_ratio", config.normal_max_eigen_ratio);
     config.point_to_point_weight =
         node->declare_parameter<double>("point_to_point_weight", config.point_to_point_weight);
+    config.moving_object_filter =
+        node->declare_parameter<bool>("moving_object_filter", config.moving_object_filter);
+    config.moving_object_min_motion =
+        node->declare_parameter<double>("moving_object_min_motion", config.moving_object_min_motion);
+    config.moving_object_same_tolerance = node->declare_parameter<double>(
+        "moving_object_same_tolerance", config.moving_object_same_tolerance);
+    config.moving_object_static_tolerance = node->declare_parameter<double>(
+        "moving_object_static_tolerance", config.moving_object_static_tolerance);
+    config.moving_object_history =
+        node->declare_parameter<int>("moving_object_history", config.moving_object_history);
+    config.moving_object_footprint = node->declare_parameter<std::vector<double>>(
+        "moving_object_footprint", config.moving_object_footprint);
+    // Blind sectors per lidar frame, entries "frame_id:from,to[,from,to...]" in degrees
+    // (the driver's ignore_array). The launch files fill it from the driver's
+    // parameter files; the online node then asks the running driver.
+    for (const auto &entry : node->declare_parameter<std::vector<std::string>>(
+             "lidar_blind_sectors", std::vector<std::string>{})) {
+        const auto colon = entry.find(':');
+        if (colon == std::string::npos) {
+            RCLCPP_WARN(node_->get_logger(), "lidar_blind_sectors: '%s' is not frame_id:from,to",
+                        entry.c_str());
+            continue;
+        }
+        SetLidarBlindSectors(entry.substr(0, colon),
+                             utils::ParseAngleSectors(entry.substr(colon + 1)),
+                             "parameter lidar_blind_sectors");
+    }
     covariance_from_registration_ =
         node->declare_parameter<bool>("covariance_from_registration", covariance_from_registration_);
     covariance_scale_ = node->declare_parameter<double>("covariance_scale", covariance_scale_);
@@ -284,6 +314,19 @@ void LidarOdometryServer::InitializePoseAndExtrinsic(
     initialize_odom_node = true;
 }
 
+void LidarOdometryServer::SetLidarBlindSectors(const std::string &frame_id,
+                                               const std::vector<double> &sectors_deg,
+                                               const std::string &source) {
+    std::ostringstream text;
+    for (std::size_t k = 0; k + 1 < sectors_deg.size(); k += 2) {
+        text << (k ? ", " : "") << sectors_deg[k] << ".." << sectors_deg[k + 1];
+    }
+    RCLCPP_INFO(node_->get_logger(), "Blind sectors of %s from %s: %s deg", frame_id.c_str(),
+                source.c_str(), sectors_deg.empty() ? "none" : text.str().c_str());
+    blind_sectors_by_frame_[frame_id] = sectors_deg;
+    blind_sectors_applied_.erase(frame_id);  // passed on with the next frame of that lidar
+}
+
 void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
     if (!initialize_odom_node) {
         InitializePoseAndExtrinsic(msg);
@@ -325,10 +368,23 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     // Run kinematic ICP
     const Sophus::SE3d prior_pose = last_pose * delta;
     bool registered = false;
+    const int sensor = static_cast<int>(std::distance(
+        sensor_frames_.cbegin(),
+        std::find(sensor_frames_.cbegin(), sensor_frames_.cend(), msg->header.frame_id)));
+    if (blind_sectors_applied_.insert(msg->header.frame_id).second) {
+        const auto it = blind_sectors_by_frame_.find(msg->header.frame_id);
+        if (it != blind_sectors_by_frame_.cend()) {
+            kinematic_icp_->SetBlindSectors(sensor, it->second);
+        } else if (config_.moving_object_filter) {
+            RCLCPP_WARN(node_->get_logger(),
+                        "No blind sectors for %s: moving_object_filter judges all directions",
+                        msg->header.frame_id.c_str());
+        }
+    }
     if (delta.log().norm() > 1e-3) {
         const auto points = PointCloud2ToEigen(msg, {});
-        const auto &[frame, kpoints] =
-            kinematic_icp_->RegisterFrame(points, timestamps, extrinsic, delta, deskew_delta);
+        const auto &[frame, kpoints] = kinematic_icp_->RegisterFrame(points, timestamps, extrinsic,
+                                                                     delta, deskew_delta, sensor);
         PublishClouds(frame, kpoints);
         registered = true;
     } else {
@@ -374,13 +430,12 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     //   4 mean squared residual [m^2]  5..7 eigenvalues of the normalized information
     //   (ascending)  8..10 odometry term diagonal (x, y, yaw)  11..13 lidar correction
     //   of the prior (x [m], y [m], yaw [rad], robot frame)  14 frames dropped out of
-    //   order so far  15 lidar index by frame (0 first seen, 1 second, ...)
+    //   order so far  15 lidar index by frame (0 first seen, 1 second, ...)  16 points
+    //   left out as moving with the robot (moving_object_filter)
     if (registration_debug_pub_->get_subscription_count() > 0) {
         std_msgs::msg::Float64MultiArray dbg;
         const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(diag.information);
         const Sophus::SE3d::Tangent corr = (prior_pose.inverse() * kinematic_icp_->pose()).log();
-        const auto frame_it =
-            std::find(sensor_frames_.cbegin(), sensor_frames_.cend(), msg->header.frame_id);
         dbg.data = {timestamps_handler_.toTime(end_odom_query),
                     registered ? 1.0 : 0.0,
                     static_cast<double>(diag.num_correspondences),
@@ -396,7 +451,8 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
                     corr(1),
                     corr(5),
                     static_cast<double>(frames_skipped_out_of_order_),
-                    static_cast<double>(std::distance(sensor_frames_.cbegin(), frame_it))};
+                    static_cast<double>(sensor),
+                    registered ? static_cast<double>(kinematic_icp_->LastNumMovingPoints()) : 0.0};
         registration_debug_pub_->publish(dbg);
     }
 

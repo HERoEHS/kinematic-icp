@@ -43,7 +43,9 @@ namespace kinematic_icp {
 //    "converges" at the prior); weight 0.1 corrects it but lets the estimate run
 //    6 m along a 1.0 m corridor, where nothing anchors the weak direction.
 //  - prior (odometry_prior true): MAP with the odometry increment as a Gaussian
-//    on (x, y, yaw). Per frame, sigma = floor + rel * |motion on that axis|; the
+//    on (x, y, yaw). Per frame, sigma = floor + rel * |motion on that axis|, rel
+//    separate for x and y (on M2 the wheels hold distance along x to ~0.5 % but
+//    slip several % sideways in a crab); the
 //    lidar term is sum |r|^2 / point_sigma^2. Normalized by N/point_sigma^2 like
 //    the J^T J above, the prior adds lambda = point_sigma^2 / (N sigma^2) both to
 //    J^T J and, times the current deviation from the prior, to J^T r. A direction
@@ -71,7 +73,8 @@ struct HolonomicOptions {
     Eigen::Vector3d damping_weights{1.0, 1.0, 0.0};  // (x, y, yaw); upstream is (1, -, 0)
     double point_sigma = 0.02;                       // [m] per correspondence
     double prior_sigma_xy_floor = 0.001;             // [m] per frame
-    double prior_sigma_xy_rel = 0.05;                // fraction of |dx| resp. |dy|
+    double prior_sigma_x_rel = 0.05;                 // fraction of |dx|
+    double prior_sigma_y_rel = 0.05;                 // fraction of |dy|
     double prior_sigma_yaw_floor = 0.0005;           // [rad] per frame
     double prior_sigma_yaw_rel = 0.02;               // fraction of |dyaw|
 };

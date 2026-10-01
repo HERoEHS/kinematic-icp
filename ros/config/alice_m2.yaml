@@ -73,7 +73,8 @@
     point_to_line: true
     point_sigma: 0.01             # [m] per correspondence; larger trusts the scan less
     prior_sigma_xy_floor: 0.001   # [m] per frame
-    prior_sigma_xy_rel: 0.05      # x 5 % of |dx|, y 5 % of |dy| per frame (crab slip)
+    prior_sigma_x_rel: 0.01       # x: 1 % of |dx| per frame (wheels hold travel well)
+    prior_sigma_y_rel: 0.05       # y: 5 % of |dy| per frame (crab slip)
     prior_sigma_yaw_floor: 0.0005 # [rad] per frame (gyro)
     prior_sigma_yaw_rel: 0.02
     normal_radius: 0.2            # [m]
@@ -83,6 +84,21 @@
     regularization_weight_x: 1.0  # damping mode only
     regularization_weight_y: 1.0
     regularization_weight_yaw: 0.0
+
+    # Leave out points that move with the robot (someone walking behind it), see
+    # moving_object_filter in cpp/kinematic_icp/pipeline/KinematicICP.hpp. Offline
+    # check on the 1001/1002 test bags (3 runs each, error vs scan reference or tape)
+    # together with prior_sigma_x_rel 0.01: mean 5.0 cm / 0.50 deg, before 14.6 cm /
+    # 0.89 deg (the 1002 straight run with someone following: 66 -> 9 cm).
+    moving_object_filter: true
+    moving_object_min_motion: 0.7        # [m] robot travel to the frame compared with
+    moving_object_same_tolerance: 0.3    # [m] still at the same place in the robot frame
+    moving_object_static_tolerance: 0.3  # [m] and not where a fixed point would be
+    moving_object_history: 200           # frames (both lidars, 20 per second)
+    # Robot body: by default the box spanned by the lidar mounts (they sit on opposite
+    # corners); moving_object_footprint: [min_x, max_x, min_y, max_y] overrides it.
+    # Blind sectors: the lidar driver's ignore_array, read by the launch files from
+    # the ydlidar_ros2_driver parameter files and asked from the running driver.
 
     # Odometry message covariance
     covariance_from_registration: false

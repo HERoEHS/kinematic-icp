@@ -43,7 +43,9 @@
 
 // STL
 #include <chrono>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -58,6 +60,12 @@ public:
 
     /// Register new frame
     void RegisterFrame(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+
+    /// ALICE M2: angular sectors the lidar with this frame id does not see ([from, to]
+    /// pairs in degrees, the driver's ignore_array), for moving_object_filter.
+    void SetLidarBlindSectors(const std::string &frame_id,
+                              const std::vector<double> &sectors_deg,
+                              const std::string &source);
     std::unique_ptr<kinematic_icp::pipeline::KinematicICP> kinematic_icp_;
     utils::TimeStampHandler timestamps_handler_;
 
@@ -89,6 +97,8 @@ private:
     bool publish_debug_clouds_;
     std::unordered_map<std::string, Sophus::SE3d> sensor_to_base_footprint_;
     std::vector<std::string> sensor_frames_;  // in the order first seen (debug index)
+    std::map<std::string, std::vector<double>> blind_sectors_by_frame_;
+    std::set<std::string> blind_sectors_applied_;
     kinematic_icp::pipeline::Config config_;
     /// ALICE M2: twist covariance from the registration information instead of the
     /// fixed values, scaled by covariance_scale_ (points in a scan are not independent).

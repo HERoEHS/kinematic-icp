@@ -15,12 +15,16 @@ so SLAM, Nav2, docking and the health monitor keep using /odometry/filtered and 
 Kinematic-ICP parameters: config/alice_m2.yaml (kicp_config:= to override).
 """
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from m2_lidar_driver_params import lidar_blind_sectors  # noqa: E402
 
 
 def _nodes(context):
@@ -41,6 +45,19 @@ def _nodes(context):
 
     ekf_frame, frame = "odom_ekf", "odom"
     ekf_topic, topic = "/odometry/ekf", "/odometry/filtered"
+    kicp_overrides = {
+        "use_sim_time": use_sim_time,
+        "wheel_odom_frame": ekf_frame,
+        "lidar_odom_frame": frame,
+        "publish_odom_tf": False,
+        "publish_correction_tf": True,
+        "corrected_odometry_input_topic": ekf_topic,
+        "corrected_odometry_output_topic": topic,
+    }
+    # Blind sectors from the lidar driver's parameter files (see m2_lidar_driver_params).
+    blind = lidar_blind_sectors()
+    if blind:
+        kicp_overrides["lidar_blind_sectors"] = blind
     return [
         Node(
             package="robot_localization", executable="ekf_node", name="ekf_filter_node",
@@ -52,15 +69,7 @@ def _nodes(context):
         Node(
             package="kinematic_icp", executable="kinematic_icp_online_node", name="online_node",
             namespace="kinematic_icp", output="screen",
-            parameters=[kicp_config, {
-                "use_sim_time": use_sim_time,
-                "wheel_odom_frame": ekf_frame,
-                "lidar_odom_frame": frame,
-                "publish_odom_tf": False,
-                "publish_correction_tf": True,
-                "corrected_odometry_input_topic": ekf_topic,
-                "corrected_odometry_output_topic": topic,
-            }],
+            parameters=[kicp_config, kicp_overrides],
         ),
     ]
 

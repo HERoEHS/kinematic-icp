@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -129,6 +130,24 @@ inline Sophus::SE3d LookupDeltaTransform(const std::string &target_frame,
         RCLCPP_WARN(rclcpp::get_logger("LookupTransform"), "%s", ex.what());
         return {};
     }
+}
+
+// ALICE M2: "from,to[,from,to...]" (the YDLidar driver's ignore_array, degrees) as
+// {from, to, ...}; empty for an empty or malformed list.
+inline std::vector<double> ParseAngleSectors(const std::string &text) {
+    std::vector<double> sectors;
+    std::stringstream stream(text);
+    std::string item;
+    while (std::getline(stream, item, ',')) {
+        if (item.find_first_not_of(" \t") == std::string::npos) continue;
+        try {
+            sectors.push_back(std::stod(item));
+        } catch (const std::exception &) {
+            return {};
+        }
+    }
+    if (sectors.size() % 2 != 0) return {};
+    return sectors;
 }
 
 // ALICE M2: per-beam time from the beam angle instead of the beam index.

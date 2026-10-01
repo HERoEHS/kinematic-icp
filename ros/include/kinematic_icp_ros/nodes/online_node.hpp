@@ -29,6 +29,7 @@
 // ROS
 #include <laser_geometry/laser_geometry.hpp>
 #include <rclcpp/node.hpp>
+#include <rclcpp/parameter_client.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
@@ -61,6 +62,18 @@ private:
     bool laser_time_from_angle_{false};
     double laser_time_origin_rad_{0.0};
     bool laser_time_increasing_{true};
+
+    // ALICE M2: ask the driver publishing each lidar topic for its ignore_array (the
+    // sectors it blanks), so moving_object_filter uses what the driver really does.
+    struct DriverQuery {
+        std::string topic;
+        std::string driver;
+        std::shared_ptr<rclcpp::AsyncParametersClient> client;
+        int tries{0};
+        bool done{false};
+    };
+    void QueryDriverBlindSectors(std::size_t index, const std::string &frame_id);
+    std::vector<DriverQuery> driver_queries_;
 };
 
 }  // namespace kinematic_icp_ros

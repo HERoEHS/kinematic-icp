@@ -63,12 +63,17 @@ OnlineNode ::OnlineNode(const rclcpp::NodeOptions &options) {
     laser_time_origin_rad_ =
         node_->declare_parameter<double>("laser_time_origin_deg", 0.0) * M_PI / 180.0;
     laser_time_increasing_ = node_->declare_parameter<bool>("laser_time_increasing", true);
-    for (const auto &topic : topics) {
+    const bool blind_from_driver =
+        node_->declare_parameter<bool>("lidar_blind_sectors_from_driver", true);
+    for (const auto &topic : topics) driver_queries_.push_back({topic, "", nullptr, 0, !blind_from_driver});
+    for (std::size_t index = 0; index < topics.size(); ++index) {
+        const auto &topic = topics[index];
         if (use_2d_lidar) {
             RCLCPP_INFO_STREAM(node_->get_logger(), "Started in 2D scanner mode with topic: " << topic);
             laser_scan_subs_.push_back(node_->create_subscription<sensor_msgs::msg::LaserScan>(
                 topic, rclcpp::SensorDataQoS(),
-                [&](const sensor_msgs::msg::LaserScan::ConstSharedPtr &msg) {
+                [this, index](const sensor_msgs::msg::LaserScan::ConstSharedPtr &msg) {
+                    QueryDriverBlindSectors(index, msg->header.frame_id);
                     auto projected_scan = std::make_shared<sensor_msgs::msg::PointCloud2>();
                     laser_projector_.projectLaser(
                         *msg, *projected_scan, -1.0,
@@ -88,6 +93,44 @@ OnlineNode ::OnlineNode(const rclcpp::NodeOptions &options) {
                 }));
         }
     }
+}
+
+void OnlineNode::QueryDriverBlindSectors(const std::size_t index, const std::string &frame_id) {
+    auto &query = driver_queries_[index];
+    if (query.done) return;
+    if (!query.client) {
+        // Right after start-up discovery may know the publisher but not its node name yet.
+        const auto publishers = node_->get_publishers_info_by_topic(query.topic);
+        if (!publishers.empty() &&
+            publishers.front().node_name().find("_UNKNOWN_") == std::string::npos) {
+            const auto &ns = publishers.front().node_namespace();
+            query.driver = (ns == "/" ? std::string{} : ns) + "/" + publishers.front().node_name();
+            query.client = std::make_shared<rclcpp::AsyncParametersClient>(node_, query.driver);
+        }
+    }
+    if (!query.client || !query.client->service_is_ready()) {
+        if (++query.tries > 100) {  // ~10 s of scans
+            query.done = true;
+            RCLCPP_WARN(node_->get_logger(),
+                        "%s: could not reach the driver (%s), keeping lidar_blind_sectors",
+                        query.topic.c_str(), query.driver.empty() ? "node unknown" : query.driver.c_str());
+        }
+        return;
+    }
+    query.done = true;
+    query.client->get_parameters(
+        {"ignore_array"}, [this, frame_id, driver = query.driver](
+                              std::shared_future<std::vector<rclcpp::Parameter>> future) {
+            const auto params = future.get();
+            if (params.empty() || params.front().get_type() != rclcpp::ParameterType::PARAMETER_STRING) {
+                RCLCPP_INFO(node_->get_logger(),
+                            "%s has no ignore_array, keeping lidar_blind_sectors for %s",
+                            driver.c_str(), frame_id.c_str());
+                return;
+            }
+            odometry_server_->SetLidarBlindSectors(
+                frame_id, utils::ParseAngleSectors(params.front().as_string()), "driver " + driver);
+        });
 }
 
 rclcpp::node_interfaces::NodeBaseInterface::SharedPtr OnlineNode::get_node_base_interface() {

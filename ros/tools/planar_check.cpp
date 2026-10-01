@@ -9,7 +9,7 @@
 // alone.
 //
 //   kinematic_icp_planar_check [key=value ...]
-//   keys: voxel holonomic prior w_xy w_yaw point_sigma xy_rel xy_floor yaw_rel yaw_floor
+//   keys: voxel holonomic prior w_xy w_yaw point_sigma xy_rel (x_rel y_rel) xy_floor yaw_rel yaw_floor
 //         p2l normal_radius normal_ratio p2p_weight seed
 #include <Eigen/Core>
 #include <chrono>
@@ -255,7 +255,9 @@ int main(int argc, char **argv) {
         else if (k == "w_xy") cfg.regularization_weight_x = cfg.regularization_weight_y = v;
         else if (k == "w_yaw") cfg.regularization_weight_yaw = v;
         else if (k == "point_sigma") cfg.point_sigma = v;
-        else if (k == "xy_rel") cfg.prior_sigma_xy_rel = v;
+        else if (k == "xy_rel") cfg.prior_sigma_x_rel = cfg.prior_sigma_y_rel = v;
+        else if (k == "x_rel") cfg.prior_sigma_x_rel = v;
+        else if (k == "y_rel") cfg.prior_sigma_y_rel = v;
         else if (k == "xy_floor") cfg.prior_sigma_xy_floor = v;
         else if (k == "yaw_rel") cfg.prior_sigma_yaw_rel = v;
         else if (k == "yaw_floor") cfg.prior_sigma_yaw_floor = v;

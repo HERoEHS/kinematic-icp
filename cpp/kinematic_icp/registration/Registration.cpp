@@ -270,8 +270,8 @@ Sophus::SE3d KinematicRegistration::ComputeRobotMotion(const std::vector<Eigen::
         if (holonomic_.odometry_prior) {
             const Sophus::SE3d::Tangent d = relative_wheel_odometry.log();
             const Eigen::Vector3d sigma(
-                holonomic_.prior_sigma_xy_floor + holonomic_.prior_sigma_xy_rel * std::abs(d(0)),
-                holonomic_.prior_sigma_xy_floor + holonomic_.prior_sigma_xy_rel * std::abs(d(1)),
+                holonomic_.prior_sigma_xy_floor + holonomic_.prior_sigma_x_rel * std::abs(d(0)),
+                holonomic_.prior_sigma_xy_floor + holonomic_.prior_sigma_y_rel * std::abs(d(1)),
                 holonomic_.prior_sigma_yaw_floor + holonomic_.prior_sigma_yaw_rel * std::abs(d(5)));
             inv_prior_var = sigma.cwiseMax(1e-9).cwiseAbs2().cwiseInverse();
         } else if (use_adaptive_odometry_regularization_) {

@@ -11,11 +11,17 @@ format to output_dir (no TF or correction published). Parameters:
 config/alice_m2.yaml (override with config_file:=). wheel_odom_frame:=odom for
 bags recorded with the EKF in its default frame.
 """
+import os
+import sys
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from m2_lidar_driver_params import lidar_blind_sectors  # noqa: E402
 
 
 def _nodes(context):
@@ -24,6 +30,10 @@ def _nodes(context):
     bag = LaunchConfiguration("bag_filename").perform(context)
     use_sim_time = LaunchConfiguration("use_sim_time").perform(context) == "true"
     common = {"use_sim_time": use_sim_time}
+    # Blind sectors from the lidar driver's parameter files (see m2_lidar_driver_params).
+    blind = lidar_blind_sectors()
+    if blind:
+        common["lidar_blind_sectors"] = blind
     wheel_odom_frame = LaunchConfiguration("wheel_odom_frame").perform(context)
     if wheel_odom_frame:
         common["wheel_odom_frame"] = wheel_odom_frame
