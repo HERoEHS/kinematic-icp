@@ -57,6 +57,10 @@ private:
     // ALICE M2: one subscription per entry of lidar_topics (several 2D lidars).
     std::vector<rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr> laser_scan_subs_;
     std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> pointcloud_subs_;
+    // ALICE M2: beam time from angle (utils::RetimeLaserCloudFromAngle).
+    bool laser_time_from_angle_{false};
+    double laser_time_origin_rad_{0.0};
+    bool laser_time_increasing_{true};
 };
 
 }  // namespace kinematic_icp_ros

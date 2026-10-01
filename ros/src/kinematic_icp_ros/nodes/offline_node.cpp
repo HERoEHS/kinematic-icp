@@ -21,6 +21,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <stdexcept>
 #include <fstream>
@@ -39,6 +40,7 @@
 
 #include "kinematic_icp_ros/nodes/offline_node.hpp"
 #include "kinematic_icp_ros/server/LidarOdometryServer.hpp"
+#include "kinematic_icp_ros/utils/RosUtils.hpp"
 #include "kinematic_icp_ros/utils/RosbagUtils.hpp"
 #include "kinematic_icp_ros/utils/indicators.hpp"
 
@@ -66,6 +68,10 @@ OfflineNode::OfflineNode(const rclcpp::NodeOptions &options) {
         throw std::runtime_error("kinematic_icp: set lidar_topic or lidar_topics");
     }
     use_2d_lidar_ = node_->declare_parameter<bool>("use_2d_lidar");
+    laser_time_from_angle_ = node_->declare_parameter<bool>("laser_time_from_angle", false);
+    laser_time_origin_rad_ =
+        node_->declare_parameter<double>("laser_time_origin_deg", 0.0) * M_PI / 180.0;
+    laser_time_increasing_ = node_->declare_parameter<bool>("laser_time_increasing", true);
     odometry_server_ = std::make_shared<LidarOdometryServer>(node_);
     if (use_2d_lidar_) {
         RCLCPP_INFO_STREAM(node_->get_logger(),
@@ -122,8 +128,13 @@ void OfflineNode::Run() {
 
     auto lidar2d_to_3d = [this](const sensor_msgs::msg::LaserScan::SharedPtr &msg) {
         auto projected_scan = std::make_shared<sensor_msgs::msg::PointCloud2>();
-        laser_projector_.projectLaser(*msg, *projected_scan, -1.0,
-                                      laser_geometry::channel_option::Timestamp);
+        laser_projector_.projectLaser(
+            *msg, *projected_scan, -1.0,
+            laser_geometry::channel_option::Timestamp | laser_geometry::channel_option::Index);
+        if (laser_time_from_angle_) {
+            utils::RetimeLaserCloudFromAngle(*projected_scan, *msg, laser_time_origin_rad_,
+                                             laser_time_increasing_);
+        }
         return projected_scan;
     };
     // Deserialize the next pointcloud message from the bagfiles

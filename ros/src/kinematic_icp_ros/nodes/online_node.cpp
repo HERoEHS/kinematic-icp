@@ -26,6 +26,7 @@
 
 // ROS
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -38,6 +39,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "kinematic_icp_ros/nodes/online_node.hpp"
+#include "kinematic_icp_ros/utils/RosUtils.hpp"
 #include "kinematic_icp_ros/server/LidarOdometryServer.hpp"
 
 namespace kinematic_icp_ros {
@@ -57,6 +59,10 @@ OnlineNode ::OnlineNode(const rclcpp::NodeOptions &options) {
     }
     odometry_server_ = std::make_shared<LidarOdometryServer>(node_);
     const bool use_2d_lidar = node_->declare_parameter<bool>("use_2d_lidar");
+    laser_time_from_angle_ = node_->declare_parameter<bool>("laser_time_from_angle", false);
+    laser_time_origin_rad_ =
+        node_->declare_parameter<double>("laser_time_origin_deg", 0.0) * M_PI / 180.0;
+    laser_time_increasing_ = node_->declare_parameter<bool>("laser_time_increasing", true);
     for (const auto &topic : topics) {
         if (use_2d_lidar) {
             RCLCPP_INFO_STREAM(node_->get_logger(), "Started in 2D scanner mode with topic: " << topic);
@@ -64,8 +70,13 @@ OnlineNode ::OnlineNode(const rclcpp::NodeOptions &options) {
                 topic, rclcpp::SensorDataQoS(),
                 [&](const sensor_msgs::msg::LaserScan::ConstSharedPtr &msg) {
                     auto projected_scan = std::make_shared<sensor_msgs::msg::PointCloud2>();
-                    laser_projector_.projectLaser(*msg, *projected_scan, -1.0,
-                                                  laser_geometry::channel_option::Timestamp);
+                    laser_projector_.projectLaser(
+                        *msg, *projected_scan, -1.0,
+                        laser_geometry::channel_option::Timestamp | laser_geometry::channel_option::Index);
+                    if (laser_time_from_angle_) {
+                        utils::RetimeLaserCloudFromAngle(*projected_scan, *msg, laser_time_origin_rad_,
+                                                         laser_time_increasing_);
+                    }
                     odometry_server_->RegisterFrame(projected_scan);
                 }));
         } else {

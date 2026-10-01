@@ -8,7 +8,14 @@ out of order), /tf (odom -> base_footprint at 50 Hz from a wheel-like prior:
 (base_footprint -> base_link and the two lidar mounts, flipped as on the robot).
 Ground truth goes to <out>_gt_tum.txt and the prior to <out>_prior_tum.txt.
 
-  make_synthetic_bag.py OUT_DIR [hall|corridor]
+  make_synthetic_bag.py OUT_DIR [hall|corridor] [ydlidar|index] [seed]
+
+Beam timing: "ydlidar" (default) emulates the YDLidar ROS 2 driver as read from
+its source: one revolution is measured from scan angle 0 deg with the angle
+increasing, header.stamp is the first measured node, and the beams are binned by
+angle into [-180, 180) deg - so array order is half a revolution off measurement
+order. "index" makes array order the measurement order, which is what
+laser_geometry assumes.
 """
 import math
 import sys
@@ -141,10 +148,12 @@ def tf_msg(t, parent, child, xyz, q):
 def main():
     out = sys.argv[1]
     scen = sys.argv[2] if len(sys.argv) > 2 else "hall"
+    timing = sys.argv[3] if len(sys.argv) > 3 else "ydlidar"
+    seed = int(sys.argv[4]) if len(sys.argv) > 4 else 7
     A, B, phases, start = world(scen)
     P, crab = integrate(phases, start)
     n = len(P)
-    rng = np.random.default_rng(7)
+    rng = np.random.default_rng(seed)
 
     # Prior (EKF-like): integrate distorted body increments at 1 ms.
     prior = np.zeros_like(P)
@@ -194,7 +203,11 @@ def main():
         while t_scan + SCAN_PERIOD < (n - 1) * DT:
             ranges = np.zeros(N_BEAMS)
             for i in range(N_BEAMS):
-                k = int(round((t_scan + i * tinc) / DT))
+                if timing == "ydlidar":
+                    frac = (math.degrees(ang[i]) % 360.0) / 360.0   # measured from 0 deg, increasing
+                else:
+                    frac = i / N_BEAMS
+                k = int(round((t_scan + frac * SCAN_PERIOD) / DT))
                 x, y, th = P[k]
                 c, s = math.cos(th), math.sin(th)
                 Rb = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
@@ -229,7 +242,7 @@ def main():
                 f.write(f"{T0 + k * DT:.6f} {x:.6f} {y:.6f} 0 0 0 {math.sin(th / 2):.9f} {math.cos(th / 2):.9f}\n")
     tum(out + "/gt_tum.txt", P)
     tum(out + "/prior_tum.txt", prior)
-    print(f"{scen}: {n * DT:.1f} s, {sum(1 for r in msgs if 'scan' in r[1])} scans -> {out}/bag")
+    print(f"{scen} ({timing} timing): {n * DT:.1f} s, {sum(1 for r in msgs if 'scan' in r[1])} scans -> {out}/bag")
 
 
 if __name__ == "__main__":

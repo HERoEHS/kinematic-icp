@@ -122,7 +122,14 @@ std::tuple<StampType, StampType, std::vector<double>> TimeStampHandler::ProcessT
         // Check if stamping happens and the beginning or the end of scan
         const bool is_stamped_at_the_beginning =
             std::abs(msg_stamp_in_seconds - max_stamp_in_seconds) > 1e-8;
-        if (is_stamped_at_the_beginning) {
+        // ALICE M2: per-point times that are offsets from header.stamp (laser_geometry
+        // "stamps", a few tenths of a second, not epoch seconds). The scan ends at
+        // stamp + max offset; upstream took stamp + (max - min), i.e. ended early by
+        // the offset of the first valid point (blocked sector, missing returns).
+        const bool relative_offsets = max_stamp_in_seconds < 1.0e6;
+        if (relative_offsets) {
+            end_stamp = StampType(rclcpp::Time(end_stamp) + tf2::durationFromSec(max_stamp_in_seconds));
+        } else if (is_stamped_at_the_beginning) {
             // begin-stamping -> add scan duration to the stamp
             const auto scan_duration =
                 tf2::durationFromSec(max_stamp_in_seconds - min_stamp_in_seconds);

@@ -26,6 +26,7 @@
 #include <tf2_ros/buffer.h>
 
 #include <Eigen/Core>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -40,6 +41,7 @@
 #include <rclcpp/logger.hpp>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/time.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <sophus/se3.hpp>
@@ -126,6 +128,33 @@ inline Sophus::SE3d LookupDeltaTransform(const std::string &target_frame,
     } catch (tf2::TransformException &ex) {
         RCLCPP_WARN(rclcpp::get_logger("LookupTransform"), "%s", ex.what());
         return {};
+    }
+}
+
+// ALICE M2: per-beam time from the beam angle instead of the beam index.
+// laser_geometry stamps beam i at i * time_increment after header.stamp, which
+// assumes the scan array is in measurement order. The YDLidar ROS 2 driver bins
+// one revolution by angle into [-180, 180) deg, while the revolution (and
+// header.stamp, its first node) starts at the device's 0 deg: index order is
+// half a revolution off the measurement order. With origin_rad the angle of the
+// first measured beam and increasing the sense of rotation in scan angles, the
+// time of a beam at angle a is wrap_0_2pi(+-(a - origin)) / 2pi * period after
+// header.stamp. Requires the "index" and "stamps" channels of projectLaser.
+inline void RetimeLaserCloudFromAngle(PointCloud2 &cloud,
+                                      const sensor_msgs::msg::LaserScan &scan,
+                                      const double origin_rad,
+                                      const bool increasing) {
+    const double n = static_cast<double>(scan.ranges.size());
+    const double period = scan.scan_time > 0.0f ? scan.scan_time : scan.time_increment * n;
+    if (!(period > 0.0) || cloud.width * cloud.height == 0) return;
+    sensor_msgs::PointCloud2Iterator<int32_t> idx(cloud, "index");
+    sensor_msgs::PointCloud2Iterator<float> stamp(cloud, "stamps");
+    constexpr double two_pi = 2.0 * M_PI;
+    for (; idx != idx.end(); ++idx, ++stamp) {
+        const double a = scan.angle_min + static_cast<double>(*idx) * scan.angle_increment;
+        double d = std::fmod((increasing ? a - origin_rad : origin_rad - a), two_pi);
+        if (d < 0.0) d += two_pi;
+        *stamp = static_cast<float>(d / two_pi * period);
     }
 }
 

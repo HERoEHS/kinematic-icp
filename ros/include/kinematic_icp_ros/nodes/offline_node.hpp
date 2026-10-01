@@ -49,6 +49,10 @@ private:
     // Common for offline/online nodes
     std::string lidar_topic_;
     bool use_2d_lidar_;
+    // ALICE M2: beam time from angle (utils::RetimeLaserCloudFromAngle).
+    bool laser_time_from_angle_{false};
+    double laser_time_origin_rad_{0.0};
+    bool laser_time_increasing_{true};
     std::shared_ptr<LidarOdometryServer> odometry_server_;
     rclcpp::Node::SharedPtr node_;
     // store data for the experiments
