@@ -1,10 +1,20 @@
 # ALICE M2 (swerve base, 2 x YDLIDAR T-mini Pro 270..360 deg / 10 Hz).
 #
-# Structure: the wheel + gyro EKF (robot_localization, wio_ekf.yaml) publishes
-# odom -> base_footprint; this node takes that as the motion prior and publishes
-# the lidar-corrected pose as odom_lidar (inverted TF: base_footprint -> odom_lidar,
-# so the tree keeps one parent per frame). Nav2 then uses odom_lidar as its odom
-# frame. The EKF does not consume this output, so there is no feedback loop.
+# Structure (launch/alice_m2_odometry.launch.py, lidar_correction:=true):
+#
+#   odom --(this node: lidar correction)--> odom_ekf --(EKF)--> base_footprint
+#
+# The wheel + gyro EKF (robot_localization, the shared wio_ekf.yaml) runs with
+# its frame renamed to odom_ekf and its topic remapped to /odometry/ekf. This
+# node takes odom_ekf -> base_footprint as the motion prior, publishes only the
+# correction odom -> odom_ekf (identity until the first scan, held if the lidars
+# stop), and republishes the EKF odometry with the correction applied as
+# /odometry/filtered in frame odom. SLAM, Nav2, docking and the health monitor
+# keep their usual names; another robot running the same EKF without lidars is
+# unaffected. The EKF does not consume this output, so there is no loop.
+#
+# For a bag recorded without this setup (EKF frame "odom"), run
+#   alice_m2.launch.py bag_filename:=... wheel_odom_frame:=odom
 #
 # Holonomic options: see cpp/kinematic_icp/registration/Registration.hpp.
 # Values below are the synthetic-check defaults (ros/tools/planar_check.cpp,
@@ -26,10 +36,15 @@
     laser_time_origin_deg: 0.0
     laser_time_increasing: true
     base_frame: base_footprint
-    wheel_odom_frame: odom        # EKF frame, used as the motion prior
-    lidar_odom_frame: odom_lidar
-    publish_odom_tf: true
+    wheel_odom_frame: odom_ekf    # EKF frame, used as the motion prior
+    lidar_odom_frame: odom        # corrected frame the rest of the system uses
+    publish_odom_tf: false        # pose TF base -> lidar_odom_frame (debug alternative)
     invert_odom_tf: true
+    publish_correction_tf: true   # odom -> odom_ekf
+    correction_tf_rate: 50.0      # [Hz]
+    correction_tf_post_date: 0.05 # [s]
+    corrected_odometry_input_topic: /odometry/ekf
+    corrected_odometry_output_topic: /odometry/filtered
     # The prior and the deskew motion are looked up at the scan end; give the EKF
     # TF this long to arrive (upstream uses 0 on hardware, i.e. identity on a miss).
     tf_timeout: 0.05

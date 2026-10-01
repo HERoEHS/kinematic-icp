@@ -126,6 +126,23 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
     covariance_from_registration_ =
         node->declare_parameter<bool>("covariance_from_registration", covariance_from_registration_);
     covariance_scale_ = node->declare_parameter<double>("covariance_scale", covariance_scale_);
+    publish_correction_tf_ =
+        node->declare_parameter<bool>("publish_correction_tf", publish_correction_tf_);
+    correction_tf_rate_ = node->declare_parameter<double>("correction_tf_rate", correction_tf_rate_);
+    correction_tf_post_date_ =
+        node->declare_parameter<double>("correction_tf_post_date", correction_tf_post_date_);
+    corrected_odometry_input_topic_ = node->declare_parameter<std::string>(
+        "corrected_odometry_input_topic", corrected_odometry_input_topic_);
+    corrected_odometry_output_topic_ = node->declare_parameter<std::string>(
+        "corrected_odometry_output_topic", corrected_odometry_output_topic_);
+    if (publish_correction_tf_ && publish_odom_tf_) {
+        // base -> lidar_odom_frame plus lidar_odom_frame -> wheel_odom_frame would close
+        // a loop in the TF tree.
+        RCLCPP_WARN(node_->get_logger(),
+                    "publish_correction_tf is set: not publishing the %s pose TF as well",
+                    lidar_odom_frame_.c_str());
+        publish_odom_tf_ = false;
+    }
     if (config.max_range < config.min_range) {
         RCLCPP_WARN(node_->get_logger(),
                     "[WARNING] max_range is smaller than min_range, settng min_range to 0.0");
@@ -150,7 +167,10 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
     set_pose_srv_ = node_->create_service<std_srvs::srv::Trigger>(
         "set_pose", [&](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                         std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-            const auto pose = LookupTransform(wheel_odom_frame_, base_frame_, tf2_buffer_);
+            // ALICE M2: in correction mode keep the current correction, so the
+            // published lidar_odom_frame does not jump back to the EKF.
+            const auto pose =
+                correction_ * LookupTransform(wheel_odom_frame_, base_frame_, tf2_buffer_);
             RCLCPP_WARN_STREAM(node_->get_logger(), "Resetting KISS-ICP pose:\n"
                                                         << pose.matrix() << "\n");
             kinematic_icp_->SetPose(pose);
@@ -161,6 +181,22 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node_);
     tf2_buffer_ = std::make_unique<tf2_ros::Buffer>(node_->get_clock());
     tf2_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf2_buffer_);
+
+    // ALICE M2 correction mode (identity until the first registration).
+    if (publish_correction_tf_ && correction_tf_rate_ > 0.0) {
+        correction_timer_ = node_->create_wall_timer(
+            std::chrono::duration<double>(1.0 / correction_tf_rate_), [this]() { PublishCorrectionTf(); });
+    }
+    if (!corrected_odometry_input_topic_.empty() && !corrected_odometry_output_topic_.empty()) {
+        corrected_odometry_pub_ =
+            node_->create_publisher<nav_msgs::msg::Odometry>(corrected_odometry_output_topic_, 10);
+        corrected_odometry_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+            corrected_odometry_input_topic_, 10,
+            [this](const nav_msgs::msg::Odometry::ConstSharedPtr msg) { RepublishCorrectedOdometry(msg); });
+        RCLCPP_INFO(node_->get_logger(), "Republishing %s as %s in frame %s",
+                    corrected_odometry_input_topic_.c_str(), corrected_odometry_output_topic_.c_str(),
+                    lidar_odom_frame_.c_str());
+    }
 
     // Initialize the odometry and tf msg. Since tf by design does not allow for having two frames
     // in the tree with a different parent, to publish the odom_lidar frame, we need to add a child
@@ -364,8 +400,56 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
         registration_debug_pub_->publish(dbg);
     }
 
+    // ALICE M2: correction mode
+    if (publish_correction_tf_ || corrected_odometry_pub_) UpdateCorrection(end_odom_query);
+
     // Spit the current estimated pose to ROS pc_out_msgs handling the desired target frame
     PublishOdometryMsg(kinematic_icp_->pose(), velocity);
+}
+
+void LidarOdometryServer::UpdateCorrection(const builtin_interfaces::msg::Time &stamp) {
+    // correction = (lidar pose of base) * (EKF pose of base)^-1 at the same instant.
+    try {
+        const Sophus::SE3d wheel_pose = tf2::transformToSophus(tf2_buffer_->lookupTransform(
+            wheel_odom_frame_, base_frame_, rclcpp::Time(stamp), rclcpp::Duration(tf_timeout_)));
+        correction_ = kinematic_icp_->pose() * wheel_pose.inverse();
+    } catch (tf2::TransformException &ex) {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                             "Correction kept (no %s -> %s at the scan end): %s",
+                             wheel_odom_frame_.c_str(), base_frame_.c_str(), ex.what());
+    }
+}
+
+void LidarOdometryServer::PublishCorrectionTf() {
+    geometry_msgs::msg::TransformStamped t;
+    // Post-dated like a localizer's map -> odom, so lookups at "now" never wait.
+    t.header.stamp = node_->now() + rclcpp::Duration::from_seconds(correction_tf_post_date_);
+    t.header.frame_id = lidar_odom_frame_;
+    t.child_frame_id = wheel_odom_frame_;
+    t.transform = tf2::sophusToTransform(correction_);
+    tf_broadcaster_->sendTransform(t);
+}
+
+void LidarOdometryServer::RepublishCorrectedOdometry(
+    const nav_msgs::msg::Odometry::ConstSharedPtr &msg) {
+    if (msg->header.frame_id != wheel_odom_frame_) {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                             "%s is in frame %s, expected %s", corrected_odometry_input_topic_.c_str(),
+                             msg->header.frame_id.c_str(), wheel_odom_frame_.c_str());
+    }
+    nav_msgs::msg::Odometry out = *msg;
+    out.header.frame_id = lidar_odom_frame_;
+    out.pose.pose = tf2::sophusToPose(correction_ * tf2::poseToSophus(msg->pose.pose));
+    // Pose covariance rotated into lidar_odom_frame; the twist is in the child frame
+    // and does not change.
+    const Eigen::Matrix3d R = correction_.so3().matrix();
+    Eigen::Matrix<double, 6, 6> J = Eigen::Matrix<double, 6, 6>::Zero();
+    J.block<3, 3>(0, 0) = R;
+    J.block<3, 3>(3, 3) = R;
+    const Eigen::Map<const Eigen::Matrix<double, 6, 6, Eigen::RowMajor>> C(msg->pose.covariance.data());
+    const Eigen::Matrix<double, 6, 6, Eigen::RowMajor> Co = J * C * J.transpose();
+    Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(out.pose.covariance.data()) = Co;
+    corrected_odometry_pub_->publish(out);
 }
 
 void LidarOdometryServer::PublishOdometryMsg(const Sophus::SE3d &pose,

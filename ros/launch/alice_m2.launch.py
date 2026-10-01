@@ -3,10 +3,13 @@
   ros2 launch kinematic_icp alice_m2.launch.py
   ros2 launch kinematic_icp alice_m2.launch.py bag_filename:=/path/to/bag output_dir:=/tmp
 
-Live, the node subscribes to the lidar topics and looks up odom -> base_footprint
-from the running EKF. With bag_filename set, the offline node reads the lidar
-topics and /tf, /tf_static from the bag and writes the poses in TUM format to
-output_dir. Parameters: config/alice_m2.yaml (override with config_file:=).
+Kinematic-ICP alone; for the EKF + correction setup use alice_m2_odometry.launch.py.
+Live, the node subscribes to the lidar topics and looks up wheel_odom_frame ->
+base_footprint from the running EKF. With bag_filename set, the offline node reads
+the lidar topics and /tf, /tf_static from the bag and writes the poses in TUM
+format to output_dir (no TF or correction published). Parameters:
+config/alice_m2.yaml (override with config_file:=). wheel_odom_frame:=odom for
+bags recorded with the EKF in its default frame.
 """
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -21,6 +24,9 @@ def _nodes(context):
     bag = LaunchConfiguration("bag_filename").perform(context)
     use_sim_time = LaunchConfiguration("use_sim_time").perform(context) == "true"
     common = {"use_sim_time": use_sim_time}
+    wheel_odom_frame = LaunchConfiguration("wheel_odom_frame").perform(context)
+    if wheel_odom_frame:
+        common["wheel_odom_frame"] = wheel_odom_frame
     if bag:
         return [Node(
             package="kinematic_icp",
@@ -31,6 +37,9 @@ def _nodes(context):
             parameters=[config_file, common, {
                 "bag_filename": bag,
                 "output_dir": LaunchConfiguration("output_dir").perform(context),
+                "publish_odom_tf": False,
+                "publish_correction_tf": False,
+                "corrected_odometry_input_topic": "",
             }],
         )]
     return [Node(
@@ -53,6 +62,8 @@ def generate_launch_description():
         DeclareLaunchArgument("output_dir", default_value=".",
                               description="Offline only: where the TUM pose file goes"),
         DeclareLaunchArgument("lidar_odometry_topic", default_value="lidar_odometry"),
+        DeclareLaunchArgument("wheel_odom_frame", default_value="",
+                              description="Override the prior frame (e.g. odom for older bags)"),
         DeclareLaunchArgument("use_sim_time", default_value="false", choices=["true", "false"]),
         OpaqueFunction(function=_nodes),
     ])

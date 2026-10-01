@@ -8,7 +8,12 @@ out of order), /tf (odom -> base_footprint at 50 Hz from a wheel-like prior:
 (base_footprint -> base_link and the two lidar mounts, flipped as on the robot).
 Ground truth goes to <out>_gt_tum.txt and the prior to <out>_prior_tum.txt.
 
-  make_synthetic_bag.py OUT_DIR [hall|corridor] [ydlidar|index] [seed]
+  make_synthetic_bag.py OUT_DIR [hall|corridor] [ydlidar|index] [seed] [ekf_frame]
+
+ekf_frame (default odom): frame of the EKF-like prior. With odom_ekf the bag
+mimics alice_m2_odometry.launch.py lidar_correction:=true: TF odom_ekf ->
+base_footprint and the prior as nav_msgs/Odometry on /odometry/ekf (50 Hz);
+otherwise TF odom -> base_footprint and /odometry/filtered.
 
 Beam timing: "ydlidar" (default) emulates the YDLidar ROS 2 driver as read from
 its source: one revolution is measured from scan angle 0 deg with the angle
@@ -25,6 +30,7 @@ import rclpy.serialization as ser
 import rosbag2_py
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from tf2_msgs.msg import TFMessage
 
@@ -150,6 +156,8 @@ def main():
     scen = sys.argv[2] if len(sys.argv) > 2 else "hall"
     timing = sys.argv[3] if len(sys.argv) > 3 else "ydlidar"
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 7
+    ekf_frame = sys.argv[5] if len(sys.argv) > 5 else "odom"
+    odom_topic = "/odometry/ekf" if ekf_frame != "odom" else "/odometry/filtered"
     A, B, phases, start = world(scen)
     P, crab = integrate(phases, start)
     n = len(P)
@@ -175,6 +183,7 @@ def main():
     writer.open(rosbag2_py.StorageOptions(uri=out + "/bag", storage_id="mcap"),
                 rosbag2_py.ConverterOptions("cdr", "cdr"))
     for i, (topic, typ) in enumerate([("/tf", "tf2_msgs/msg/TFMessage"), ("/tf_static", "tf2_msgs/msg/TFMessage"),
+                                      (odom_topic, "nav_msgs/msg/Odometry"),
                                       (MOUNTS["front"]["topic"], "sensor_msgs/msg/LaserScan"),
                                       (MOUNTS["rear"]["topic"], "sensor_msgs/msg/LaserScan")]):
         writer.create_topic(rosbag2_py.TopicMetadata(id=i, name=topic, type=typ, serialization_format="cdr"))
@@ -191,7 +200,16 @@ def main():
         t = T0 + k * DT
         x, y, th = prior[k]
         msgs.append((t + 0.002, "/tf", TFMessage(transforms=[
-            tf_msg(t, "odom", "base_footprint", (x, y, 0), (0, 0, math.sin(th / 2), math.cos(th / 2)))])))
+            tf_msg(t, ekf_frame, "base_footprint", (x, y, 0), (0, 0, math.sin(th / 2), math.cos(th / 2)))])))
+        od = Odometry()
+        od.header.stamp = stamp(t)
+        od.header.frame_id = ekf_frame
+        od.child_frame_id = "base_footprint"
+        od.pose.pose.position.x, od.pose.pose.position.y = float(x), float(y)
+        od.pose.pose.orientation.z, od.pose.pose.orientation.w = math.sin(th / 2), math.cos(th / 2)
+        od.pose.covariance[0] = od.pose.covariance[7] = 0.01
+        od.pose.covariance[35] = 0.001
+        msgs.append((t + 0.002, odom_topic, od))
 
     ang = np.radians(-180.0 + 360.0 * np.arange(N_BEAMS) / N_BEAMS)
     ign = (np.degrees(ang) >= IGNORE_DEG[0]) & (np.degrees(ang) <= IGNORE_DEG[1])

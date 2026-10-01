@@ -74,6 +74,10 @@ private:
     /// ALICE M2: lidar-to-base extrinsic per sensor frame, looked up once per frame id
     /// (two lidars feed one server). False while the transform is not available yet.
     bool LookupExtrinsic(const std::string &sensor_frame, Sophus::SE3d &extrinsic);
+    /// ALICE M2 correction mode, see publish_correction_tf_ below.
+    void UpdateCorrection(const builtin_interfaces::msg::Time &stamp);
+    void PublishCorrectionTf();
+    void RepublishCorrectedOdometry(const nav_msgs::msg::Odometry::ConstSharedPtr &msg);
 
     /// Tools for broadcasting TFs.
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -94,6 +98,22 @@ private:
     double orientation_covariance_{0.1};
     std::size_t frames_skipped_out_of_order_{0};
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr registration_debug_pub_;
+    /// ALICE M2 correction mode. Instead of a second pose frame (base -> odom_lidar),
+    /// publish only the lidar correction as lidar_odom_frame -> wheel_odom_frame
+    /// (e.g. odom -> odom_ekf), like a localizer's map -> odom: the pose then
+    /// follows the EKF at its rate and latency and the correction changes at scan
+    /// rate. It starts at identity and holds its last value if the lidars stop.
+    /// corrected_odometry_*: republish the EKF odometry with the correction applied,
+    /// in lidar_odom_frame, so consumers of the usual topic get the corrected pose.
+    bool publish_correction_tf_{false};
+    double correction_tf_rate_{50.0};
+    double correction_tf_post_date_{0.05};
+    std::string corrected_odometry_input_topic_;
+    std::string corrected_odometry_output_topic_;
+    Sophus::SE3d correction_;  // lidar_odom_frame <- wheel_odom_frame
+    rclcpp::TimerBase::SharedPtr correction_timer_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr corrected_odometry_sub_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr corrected_odometry_pub_;
 
     /// Data publishers.
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
