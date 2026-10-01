@@ -24,6 +24,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 // ROS
 #include <laser_geometry/laser_geometry.hpp>
@@ -53,6 +54,9 @@ private:
     // Online node specifics
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr laser_scan_sub_;
+    // ALICE M2: one subscription per entry of lidar_topics (several 2D lidars).
+    std::vector<rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr> laser_scan_subs_;
+    std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> pointcloud_subs_;
 };
 
 }  // namespace kinematic_icp_ros

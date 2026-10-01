@@ -25,6 +25,11 @@
 #include <string>
 
 // ROS
+#include <algorithm>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 #include <laser_geometry/laser_geometry.hpp>
 #include <rclcpp/node.hpp>
 #include <rclcpp/node_options.hpp>
@@ -39,31 +44,38 @@ namespace kinematic_icp_ros {
 
 OnlineNode ::OnlineNode(const rclcpp::NodeOptions &options) {
     node_ = rclcpp::Node::make_shared("kinematic_icp_online_node", options);
-    lidar_topic_ = node_->declare_parameter<std::string>("lidar_topic");
+    // ALICE M2: lidar_topics (several sensors into one estimate) takes precedence
+    // over the single upstream lidar_topic. Each frame is registered with the
+    // extrinsic of its own header.frame_id.
+    lidar_topic_ = node_->declare_parameter<std::string>("lidar_topic", "");
+    auto topics = node_->declare_parameter<std::vector<std::string>>("lidar_topics",
+                                                                     std::vector<std::string>{});
+    topics.erase(std::remove(topics.begin(), topics.end(), std::string{}), topics.end());
+    if (topics.empty() && !lidar_topic_.empty()) topics.push_back(lidar_topic_);
+    if (topics.empty()) {
+        throw std::runtime_error("kinematic_icp: set lidar_topic or lidar_topics");
+    }
     odometry_server_ = std::make_shared<LidarOdometryServer>(node_);
     const bool use_2d_lidar = node_->declare_parameter<bool>("use_2d_lidar");
-    if (use_2d_lidar) {
-        RCLCPP_INFO_STREAM(node_->get_logger(),
-                           "Started in 2D scanner mode with topic: " << lidar_topic_);
-        laser_scan_sub_ = node_->create_subscription<sensor_msgs::msg::LaserScan>(
-            lidar_topic_, rclcpp::SensorDataQoS(),
-            [&](const sensor_msgs::msg::LaserScan::ConstSharedPtr &msg) {
-                const sensor_msgs::msg::PointCloud2::ConstSharedPtr lidar_msg = [&]() {
+    for (const auto &topic : topics) {
+        if (use_2d_lidar) {
+            RCLCPP_INFO_STREAM(node_->get_logger(), "Started in 2D scanner mode with topic: " << topic);
+            laser_scan_subs_.push_back(node_->create_subscription<sensor_msgs::msg::LaserScan>(
+                topic, rclcpp::SensorDataQoS(),
+                [&](const sensor_msgs::msg::LaserScan::ConstSharedPtr &msg) {
                     auto projected_scan = std::make_shared<sensor_msgs::msg::PointCloud2>();
                     laser_projector_.projectLaser(*msg, *projected_scan, -1.0,
                                                   laser_geometry::channel_option::Timestamp);
-                    return projected_scan;
-                }();
-                odometry_server_->RegisterFrame(lidar_msg);
-            });
-    } else {
-        RCLCPP_INFO_STREAM(node_->get_logger(),
-                           "Started in 3D Lidar mode with topic: " << lidar_topic_);
-        pointcloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            lidar_topic_, rclcpp::SensorDataQoS(),
-            [&](const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
-                odometry_server_->RegisterFrame(msg);
-            });
+                    odometry_server_->RegisterFrame(projected_scan);
+                }));
+        } else {
+            RCLCPP_INFO_STREAM(node_->get_logger(), "Started in 3D Lidar mode with topic: " << topic);
+            pointcloud_subs_.push_back(node_->create_subscription<sensor_msgs::msg::PointCloud2>(
+                topic, rclcpp::SensorDataQoS(),
+                [&](const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
+                    odometry_server_->RegisterFrame(msg);
+                }));
+        }
     }
 }
 

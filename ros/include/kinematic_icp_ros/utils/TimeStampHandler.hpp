@@ -47,6 +47,10 @@ struct TimeStampHandler {
     };
 
     StampType last_processed_stamp_;
+    // ALICE M2: absolute time of the first point of the scan last processed (equal
+    // to its end stamp when the cloud carries no per-point time). Used to deskew
+    // over the scan's own span when two lidars interleave.
+    StampType last_scan_begin_stamp_;
 };
 
 }  // namespace kinematic_icp_ros::utils

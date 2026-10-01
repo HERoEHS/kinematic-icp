@@ -20,7 +20,9 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+#include <algorithm>
 #include <filesystem>
+#include <stdexcept>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -54,7 +56,15 @@ namespace kinematic_icp_ros {
 
 OfflineNode::OfflineNode(const rclcpp::NodeOptions &options) {
     node_ = rclcpp::Node::make_shared("kinematic_icp_offline_node", options);
-    lidar_topic_ = node_->declare_parameter<std::string>("lidar_topic");
+    // ALICE M2: lidar_topics (several sensors) takes precedence over lidar_topic.
+    lidar_topic_ = node_->declare_parameter<std::string>("lidar_topic", "");
+    auto topics = node_->declare_parameter<std::vector<std::string>>("lidar_topics",
+                                                                     std::vector<std::string>{});
+    topics.erase(std::remove(topics.begin(), topics.end(), std::string{}), topics.end());
+    if (topics.empty() && !lidar_topic_.empty()) topics.push_back(lidar_topic_);
+    if (topics.empty()) {
+        throw std::runtime_error("kinematic_icp: set lidar_topic or lidar_topics");
+    }
     use_2d_lidar_ = node_->declare_parameter<bool>("use_2d_lidar");
     odometry_server_ = std::make_shared<LidarOdometryServer>(node_);
     if (use_2d_lidar_) {
@@ -70,7 +80,7 @@ OfflineNode::OfflineNode(const rclcpp::NodeOptions &options) {
     output_pose_file_ = std::filesystem::path(node_->declare_parameter<std::string>("output_dir"));
     output_pose_file_ /= poses_filename;
     auto tf_bridge = std::make_shared<BufferableBag::TFBridge>(node_);
-    bag_multiplexer_.AddBag(BufferableBag(bag_filename, tf_bridge, lidar_topic_));
+    bag_multiplexer_.AddBag(BufferableBag(bag_filename, tf_bridge, topics));
 }
 
 void OfflineNode::writePosesInTumFormat() {

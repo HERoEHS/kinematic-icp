@@ -74,20 +74,26 @@ BufferableBag::BufferableBag(const std::string &bag_filename,
                              const std::shared_ptr<TFBridge> tf_bridge,
                              const std::string &topic,
                              const std::chrono::seconds buffer_size)
+    : BufferableBag(bag_filename, tf_bridge, std::vector<std::string>{topic}, buffer_size) {}
+
+BufferableBag::BufferableBag(const std::string &bag_filename,
+                             const std::shared_ptr<TFBridge> tf_bridge,
+                             const std::vector<std::string> &topics,
+                             const std::chrono::seconds buffer_size)
     : tf_bridge_(tf_bridge),
       bag_reader_(std::make_unique<rosbag2_cpp::Reader>()),
-      topic_(topic),
-      buffer_size_(buffer_size) {
+      buffer_size_(buffer_size),
+      topics_(topics) {
     bag_reader_->open(bag_filename);
     message_count_ = [&]() {
         std::size_t message_count = 0;
         const auto &metadata = bag_reader_->get_metadata();
         const auto topic_info = metadata.topics_with_message_count;
-        const auto it = std::find_if(topic_info.begin(), topic_info.end(), [&](const auto &info) {
-            return info.topic_metadata.name == topic_;
-        });
-        if (it != topic_info.end()) {
-            message_count += it->message_count;
+        for (const auto &info : topic_info) {
+            if (std::find(topics_.cbegin(), topics_.cend(), info.topic_metadata.name) !=
+                topics_.cend()) {
+                message_count += info.message_count;
+            }
         }
         return message_count;
     }();
@@ -116,7 +122,7 @@ void BufferableBag::BufferMessages() {
         // populate the buffered_messages_ as we already processed it
         if (msg->topic_name == "/tf" || msg->topic_name == "/tf_static") {
             tf_bridge_->ProcessTFMessage(msg);
-        } else if (msg->topic_name == topic_) {
+        } else if (std::find(topics_.cbegin(), topics_.cend(), msg->topic_name) != topics_.cend()) {
             // If the msg is not TFMessage then push it to the interal buffer of all messages
             buffer_.push(*msg);
         }

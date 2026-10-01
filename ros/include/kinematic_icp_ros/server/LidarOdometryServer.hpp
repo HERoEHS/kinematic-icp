@@ -36,6 +36,7 @@
 #include <rclcpp/time.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sophus/se3.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -44,6 +45,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace kinematic_icp_ros {
@@ -69,6 +71,9 @@ private:
 
     // Temporal initializaiton strattegy until we convert the odometry server to life cycle
     void InitializePoseAndExtrinsic(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+    /// ALICE M2: lidar-to-base extrinsic per sensor frame, looked up once per frame id
+    /// (two lidars feed one server). False while the transform is not available yet.
+    bool LookupExtrinsic(const std::string &sensor_frame, Sophus::SE3d &extrinsic);
 
     /// Tools for broadcasting TFs.
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -78,7 +83,17 @@ private:
     bool publish_odom_tf_;
     bool invert_odom_tf_;
     bool publish_debug_clouds_;
-    Sophus::SE3d sensor_to_base_footprint_;
+    std::unordered_map<std::string, Sophus::SE3d> sensor_to_base_footprint_;
+    std::vector<std::string> sensor_frames_;  // in the order first seen (debug index)
+    kinematic_icp::pipeline::Config config_;
+    /// ALICE M2: twist covariance from the registration information instead of the
+    /// fixed values, scaled by covariance_scale_ (points in a scan are not independent).
+    bool covariance_from_registration_{false};
+    double covariance_scale_{1.0};
+    double position_covariance_{0.1};
+    double orientation_covariance_{0.1};
+    std::size_t frames_skipped_out_of_order_{0};
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr registration_debug_pub_;
 
     /// Data publishers.
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;

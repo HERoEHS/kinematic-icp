@@ -1,0 +1,65 @@
+# ALICE M2 (swerve base, 2 x YDLIDAR T-mini Pro 270..360 deg / 10 Hz).
+#
+# Structure: the wheel + gyro EKF (robot_localization, wio_ekf.yaml) publishes
+# odom -> base_footprint; this node takes that as the motion prior and publishes
+# the lidar-corrected pose as odom_lidar (inverted TF: base_footprint -> odom_lidar,
+# so the tree keeps one parent per frame). Nav2 then uses odom_lidar as its odom
+# frame. The EKF does not consume this output, so there is no feedback loop.
+#
+# Holonomic options: see cpp/kinematic_icp/registration/Registration.hpp.
+# Values below are the synthetic-check defaults (ros/tools/planar_check.cpp,
+# 5 seeds: hall final 9.1 -> 1.0 cm, corridor 4.9 -> 3.8 cm against the prior
+# alone; upstream unicycle 5.6 / 9.0 cm). Re-tune on robot bags.
+/**:
+  ros__parameters:
+    lidar_topics: ["/ydlidar_front/scan", "/ydlidar_rear/scan"]
+    use_2d_lidar: true
+    base_frame: base_footprint
+    wheel_odom_frame: odom        # EKF frame, used as the motion prior
+    lidar_odom_frame: odom_lidar
+    publish_odom_tf: true
+    invert_odom_tf: true
+    # The prior and the deskew motion are looked up at the scan end; give the EKF
+    # TF this long to arrive (upstream uses 0 on hardware, i.e. identity on a miss).
+    tf_timeout: 0.05
+
+    # Preprocessing
+    max_range: 12.0               # T-mini Pro spec (80 % reflectivity)
+    min_range: 0.05
+    # Mapping
+    voxel_size: 0.25
+    max_points_per_voxel: 20
+    # Correspondence threshold
+    use_adaptive_threshold: true
+    fixed_threshold: 1.0
+    # Registration
+    max_num_iterations: 10
+    convergence_criterion: 0.001
+    max_num_threads: 1
+    use_adaptive_odometry_regularization: true   # damping mode only
+    fixed_regularization: 0.0
+    deskew: true
+
+    # Holonomic (x, y, yaw) with the odometry as a Gaussian prior and
+    # point-to-line residuals.
+    holonomic: true
+    odometry_prior: true
+    point_to_line: true
+    point_sigma: 0.01             # [m] per correspondence; larger trusts the scan less
+    prior_sigma_xy_floor: 0.001   # [m] per frame
+    prior_sigma_xy_rel: 0.05      # x 5 % of |dx|, y 5 % of |dy| per frame (crab slip)
+    prior_sigma_yaw_floor: 0.0005 # [rad] per frame (gyro)
+    prior_sigma_yaw_rel: 0.02
+    normal_radius: 0.2            # [m]
+    normal_min_points: 4
+    normal_max_eigen_ratio: 0.05
+    point_to_point_weight: 0.0    # 0.1 helped some synthetic corridors, hurt others
+    regularization_weight_x: 1.0  # damping mode only
+    regularization_weight_y: 1.0
+    regularization_weight_yaw: 0.0
+
+    # Odometry message covariance
+    covariance_from_registration: false
+    covariance_scale: 1.0
+    position_covariance: 0.1
+    orientation_covariance: 0.1

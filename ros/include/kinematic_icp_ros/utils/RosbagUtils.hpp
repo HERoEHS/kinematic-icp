@@ -56,6 +56,11 @@ public:
                   const std::shared_ptr<TFBridge> tf_bridge,
                   const std::string &topic,
                   const std::chrono::seconds buffer_size = std::chrono::seconds(1));
+    // ALICE M2: several lidar topics from one bag, delivered in bag order.
+    BufferableBag(const std::string &bag_filename,
+                  const std::shared_ptr<TFBridge> tf_bridge,
+                  const std::vector<std::string> &topics,
+                  const std::chrono::seconds buffer_size = std::chrono::seconds(1));
 
     std::size_t message_count() const;
     void BufferMessages();
@@ -67,7 +72,7 @@ private:
     std::unique_ptr<rosbag2_cpp::Reader> bag_reader_;
     std::queue<rosbag2_storage::SerializedBagMessage> buffer_;
     std::chrono::seconds buffer_size_;
-    std::string topic_;
+    std::vector<std::string> topics_;
     std::size_t message_count_{0};
 };
 
