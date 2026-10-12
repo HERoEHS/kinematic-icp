@@ -4,7 +4,8 @@
   ros2 launch kinematic_icp alice_m2_odometry.launch.py lidar_correction:=false
 
 lidar_correction:=false starts the EKF exactly as robot_localization's
-wio_ekf.launch.py does (same node name, same shared wio_ekf.yaml): /odometry/filtered
+wio_ekf.launch.py does in an ALICE_GENERATION=alice_m2 shell (same node name, same
+shared params/alice_m2/wio_ekf.yaml): /odometry/filtered
 and odom -> base_footprint, the same as on robots without lidars.
 
 lidar_correction:=true keeps the shared files untouched and only renames at launch:
@@ -30,8 +31,12 @@ from m2_lidar_driver_params import lidar_blind_sectors  # noqa: E402
 def _nodes(context):
     rl_share = get_package_share_directory("robot_localization")
     kicp_share = get_package_share_directory("kinematic_icp")
-    ekf_params = LaunchConfiguration("ekf_params").perform(context) or os.path.join(
-        rl_share, "params", "wio_ekf.yaml")
+    # robot_localization keeps one wio_ekf.yaml per generation (params/alice_m2/); older
+    # installs had a single params/wio_ekf.yaml.
+    ekf_candidates = [os.path.join(rl_share, "params", "alice_m2", "wio_ekf.yaml"),
+                      os.path.join(rl_share, "params", "wio_ekf.yaml")]
+    ekf_params = LaunchConfiguration("ekf_params").perform(context) or next(
+        (p for p in ekf_candidates if os.path.isfile(p)), ekf_candidates[0])
     kicp_config = LaunchConfiguration("kicp_config").perform(context) or os.path.join(
         kicp_share, "config", "alice_m2.yaml")
     use_sim_time = LaunchConfiguration("use_sim_time").perform(context) == "true"
@@ -78,7 +83,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("lidar_correction", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument("ekf_params", default_value="",
-                              description="EKF parameters (default: robot_localization wio_ekf.yaml)"),
+                              description="EKF parameters (default: robot_localization"
+                                          " params/alice_m2/wio_ekf.yaml)"),
         DeclareLaunchArgument("kicp_config", default_value="",
                               description="Kinematic-ICP parameters (default: config/alice_m2.yaml)"),
         DeclareLaunchArgument("use_sim_time", default_value="false", choices=["true", "false"]),
