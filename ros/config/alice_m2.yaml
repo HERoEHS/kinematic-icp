@@ -25,13 +25,15 @@
     lidar_topics: ["/ydlidar_front/scan", "/ydlidar_rear/scan"]
     use_2d_lidar: true
     # Beam time from the beam angle (utils::RetimeLaserCloudFromAngle). Read from
-    # the YDLidar ROS 2 driver source, not yet measured: a revolution is measured
-    # from scan angle 0 deg with the angle increasing and header.stamp is its first
-    # node, but the array is binned from -180 deg, so index order is half a
-    # revolution off. Synthetic YDLidar-timed bag (hall, 3 seeds): index timing
-    # rms 1.5 cm / yaw max 1.36 deg, retimed 0.51 cm / 0.39 deg. To confirm on the
-    # robot: spin in place with this on and off and compare the residual
-    # (registration_debug[4]) and the yaw against the gyro.
+    # the YDLidar ROS 2 driver source and confirmed on robot bags: a revolution is
+    # measured from scan angle 0 deg with the angle increasing and header.stamp is
+    # its first node, but the array is binned from -180 deg, so index order is half
+    # a revolution off. Synthetic YDLidar-timed bag (hall, 3 seeds): index timing
+    # rms 1.5 cm / yaw max 1.36 deg, retimed 0.51 cm / 0.39 deg. Robot bags
+    # 2026-10-01 (spin in place up to 75 deg/s and lab squares, both lidars matched
+    # to a map of the standing start scans): index timing puts the scans 45 ms off
+    # every odometry (ICP inlier 0.66-0.69), angle timing 0 deg increasing 0 ms
+    # (inlier 0.88-0.92); decreasing is worse than either.
     laser_time_from_angle: true
     laser_time_origin_deg: 0.0
     laser_time_increasing: true
