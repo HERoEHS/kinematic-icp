@@ -107,6 +107,10 @@ private:
     double position_covariance_{0.1};
     double orientation_covariance_{0.1};
     std::size_t frames_skipped_out_of_order_{0};
+    /// ALICE M2: lidar (sensor_frames_ index) of the frame processed last, and the
+    /// velocity published with it (kept for a frame right after the other lidar).
+    int last_sensor_{-1};
+    Sophus::SE3d::Tangent last_velocity_{Sophus::SE3d::Tangent::Zero()};
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr registration_debug_pub_;
     /// ALICE M2 correction mode. Instead of a second pose frame (base -> odom_lidar),
     /// publish only the lidar correction as lidar_odom_frame -> wheel_odom_frame

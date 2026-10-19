@@ -337,6 +337,12 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     // ALICE M2: one extrinsic per sensor frame, so several lidars can feed one server.
     Sophus::SE3d extrinsic;
     if (!LookupExtrinsic(msg->header.frame_id, extrinsic)) return;
+    const int sensor = static_cast<int>(std::distance(
+        sensor_frames_.cbegin(),
+        std::find(sensor_frames_.cbegin(), sensor_frames_.cend(), msg->header.frame_id)));
+    if (last_sensor_ < 0) last_sensor_ = sensor;
+    // ALICE M2: the frame processed last came from the other lidar.
+    const bool other_lidar = sensor != last_sensor_;
 
     // Buffer the last state This will be used for computing the veloicty
     const auto last_pose = kinematic_icp_->pose();
@@ -344,8 +350,11 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     const auto &[begin_odom_query, end_odom_query, timestamps] =
         timestamps_handler_.ProcessTimestamps(msg);
     // ALICE M2: with two lidars a scan can end before the one processed last (their
-    // latencies differ); its interval would run backwards. Drop it.
-    if (rclcpp::Time(end_odom_query) <= rclcpp::Time(previous_stamp)) {
+    // latencies differ); its interval would run backwards. Drop it. A scan of the other
+    // lidar ending at the same instant is kept: it sees the same moment from another
+    // place (simulated lidars spin in lockstep, so this is every second frame there).
+    const rclcpp::Time end_time(end_odom_query), previous_time(previous_stamp);
+    if (end_time < previous_time || (end_time == previous_time && !other_lidar)) {
         timestamps_handler_.last_processed_stamp_ = previous_stamp;
         ++frames_skipped_out_of_order_;
         RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
@@ -353,6 +362,7 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
                              frames_skipped_out_of_order_, msg->header.frame_id.c_str());
         return;
     }
+    last_sensor_ = sensor;
 
     // Get the initial guess from the wheel odometry
     const auto delta =
@@ -368,9 +378,6 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     // Run kinematic ICP
     const Sophus::SE3d prior_pose = last_pose * delta;
     bool registered = false;
-    const int sensor = static_cast<int>(std::distance(
-        sensor_frames_.cbegin(),
-        std::find(sensor_frames_.cbegin(), sensor_frames_.cend(), msg->header.frame_id)));
     if (blind_sectors_applied_.insert(msg->header.frame_id).second) {
         const auto it = blind_sectors_by_frame_.find(msg->header.frame_id);
         if (it != blind_sectors_by_frame_.cend()) {
@@ -381,7 +388,17 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
                         msg->header.frame_id.c_str());
         }
     }
-    if (delta.log().norm() > 1e-3) {
+    // ALICE M2: whether the robot moves is judged on the increment since the frame
+    // processed last. A scan of the other lidar ending at the same instant (lockstep
+    // simulated lidars, every second frame) has none although the robot moved; the
+    // motion during this scan decides then. Not for scans merely close in time (a few
+    // ms apart now and then on the robot): registering those made the robot bags worse
+    // (2026-10-19, tape-measured end error over six runs 4.7 -> 6.9 cm), so the robot
+    // keeps skipping them as before.
+    const bool moved_since_last = delta.log().norm() > 1e-3;
+    const bool same_instant = other_lidar && end_time == previous_time;
+    const bool moved_in_scan = same_instant && deskew_delta.log().norm() > 1e-3;
+    if (moved_since_last || moved_in_scan) {
         const auto points = PointCloud2ToEigen(msg, {});
         const auto &[frame, kpoints] = kinematic_icp_->RegisterFrame(points, timestamps, extrinsic,
                                                                      delta, deskew_delta, sensor);
@@ -398,9 +415,13 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     const double elapsed_time =
         timestamps_handler_.toTime(end_odom_query) - timestamps_handler_.toTime(begin_odom_query);
     const Sophus::SE3d::Tangent delta_twist = (last_pose.inverse() * kinematic_icp_->pose()).log();
+    // ALICE M2: no time since the frame before (the other lidar at the same instant), so
+    // no interval to divide by: keep the last velocity.
     const Sophus::SE3d::Tangent velocity =
-        elapsed_time > 1e-4 ? Sophus::SE3d::Tangent(delta_twist / elapsed_time)
-                            : Sophus::SE3d::Tangent::Zero();
+        same_instant          ? last_velocity_
+        : elapsed_time > 1e-4 ? Sophus::SE3d::Tangent(delta_twist / elapsed_time)
+                              : Sophus::SE3d::Tangent::Zero();
+    last_velocity_ = velocity;
 
     // ALICE M2: twist covariance from the registration information. The normalized
     // information H = J^T J / N + Omega gives the increment covariance
@@ -431,7 +452,8 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     //   (ascending)  8..10 odometry term diagonal (x, y, yaw)  11..13 lidar correction
     //   of the prior (x [m], y [m], yaw [rad], robot frame)  14 frames dropped out of
     //   order so far  15 lidar index by frame (0 first seen, 1 second, ...)  16 points
-    //   left out as moving with the robot (moving_object_filter)
+    //   left out as moving with the robot (moving_object_filter)  17 the other lidar
+    //   ended at the same instant just before (0/1; registered when moving, see above)
     if (registration_debug_pub_->get_subscription_count() > 0) {
         std_msgs::msg::Float64MultiArray dbg;
         const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(diag.information);
@@ -452,7 +474,8 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
                     corr(5),
                     static_cast<double>(frames_skipped_out_of_order_),
                     static_cast<double>(sensor),
-                    registered ? static_cast<double>(kinematic_icp_->LastNumMovingPoints()) : 0.0};
+                    registered ? static_cast<double>(kinematic_icp_->LastNumMovingPoints()) : 0.0,
+                    same_instant ? 1.0 : 0.0};
         registration_debug_pub_->publish(dbg);
     }
 
@@ -511,7 +534,10 @@ void LidarOdometryServer::RepublishCorrectedOdometry(
 void LidarOdometryServer::PublishOdometryMsg(const Sophus::SE3d &pose,
                                              const Sophus::SE3d::Tangent &velocity) {
     // Broadcast over the tf tree
-    if (publish_odom_tf_) {
+    // ALICE M2: a frame of the other lidar ending at the same instant must not repeat
+    // the TF stamp (tf2 rejects it as TF_REPEATED_DATA).
+    if (publish_odom_tf_ &&
+        rclcpp::Time(timestamps_handler_.last_processed_stamp_) != rclcpp::Time(tf_msg_.header.stamp)) {
         tf_msg_.transform = [&]() {
             if (invert_odom_tf_) return tf2::sophusToTransform(pose.inverse());
             return tf2::sophusToTransform(pose);

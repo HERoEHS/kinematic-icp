@@ -8,12 +8,16 @@ out of order), /tf (odom -> base_footprint at 50 Hz from a wheel-like prior:
 (base_footprint -> base_link and the two lidar mounts, flipped as on the robot).
 Ground truth goes to <out>_gt_tum.txt and the prior to <out>_prior_tum.txt.
 
-  make_synthetic_bag.py OUT_DIR [hall|corridor] [ydlidar|index] [seed] [ekf_frame]
+  make_synthetic_bag.py OUT_DIR [hall|corridor] [ydlidar|index] [seed] [ekf_frame] [interleaved|lockstep]
 
 ekf_frame (default odom): frame of the EKF-like prior. With odom_ekf the bag
 mimics alice_m2_odometry.launch.py lidar_correction:=true: TF odom_ekf ->
 base_footprint and the prior as nav_msgs/Odometry on /odometry/ekf (50 Hz);
 otherwise TF odom -> base_footprint and /odometry/filtered.
+
+lidars (default interleaved): the rear lidar runs 37 ms behind the front one, as two
+free-running lidars do most of the time. lockstep gives both the same phase and
+latency - the scans end at the same instant, as with the simulated lidars in Isaac.
 
 Beam timing: "ydlidar" (default) emulates the YDLidar ROS 2 driver as read from
 its source: one revolution is measured from scan angle 0 deg with the angle
@@ -158,6 +162,11 @@ def main():
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 7
     ekf_frame = sys.argv[5] if len(sys.argv) > 5 else "odom"
     odom_topic = "/odometry/ekf" if ekf_frame != "odom" else "/odometry/filtered"
+    lidars = sys.argv[6] if len(sys.argv) > 6 else "interleaved"
+    if lidars == "lockstep":
+        MOUNTS["rear"].update(phase=MOUNTS["front"]["phase"], latency=MOUNTS["front"]["latency"])
+    elif lidars != "interleaved":
+        raise SystemExit(f"lidars must be interleaved or lockstep, not {lidars!r}")
     A, B, phases, start = world(scen)
     P, crab = integrate(phases, start)
     n = len(P)
@@ -260,7 +269,8 @@ def main():
                 f.write(f"{T0 + k * DT:.6f} {x:.6f} {y:.6f} 0 0 0 {math.sin(th / 2):.9f} {math.cos(th / 2):.9f}\n")
     tum(out + "/gt_tum.txt", P)
     tum(out + "/prior_tum.txt", prior)
-    print(f"{scen} ({timing} timing): {n * DT:.1f} s, {sum(1 for r in msgs if 'scan' in r[1])} scans -> {out}/bag")
+    print(f"{scen} ({timing} timing, {lidars} lidars): {n * DT:.1f} s, "
+          f"{sum(1 for r in msgs if 'scan' in r[1])} scans -> {out}/bag")
 
 
 if __name__ == "__main__":
