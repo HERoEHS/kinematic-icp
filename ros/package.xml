@@ -32,6 +32,7 @@ SOFTWARE.
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>diagnostic_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rclcpp</depend>

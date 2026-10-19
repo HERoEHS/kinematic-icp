@@ -102,6 +102,24 @@
     # Blind sectors: the lidar driver's ignore_array, read by the launch files from
     # the ydlidar_ros2_driver parameter files and asked from the running driver.
 
+    # Lidar degeneracy, published every frame on /kinematic_icp/degeneracy
+    # (diagnostic_msgs/DiagnosticArray, level WARN while degenerate), see
+    # cpp/kinematic_icp/registration/Degeneracy.hpp. The scan-only information of the
+    # frames registered in the last window: "corridor" when lambda_min / lambda_max of
+    # the position information drops below ratio_enter (the position along weak_axis_deg
+    # then rests on the wheels), "sparse" when too few line matches (open space).
+    # Starting values (2026-10-19): the robot corridor bags of 2026-10-01/02
+    # (~/alice_log straight_01..03, crab_01) fall below 0.05 deep in the corridor and
+    # stay above 0.1 at the junction; registered frames there had 17..34 matches.
+    # Synthetic check (tools/planar_check.cpp, 3 seeds): 1 m corridor 100 % flagged
+    # along 0 deg, hall 0 % after the first second (empty map). Re-tune on robot runs.
+    degeneracy_window: 1.0            # [s]
+    degeneracy_ratio_enter: 0.05
+    degeneracy_ratio_exit: 0.10
+    degeneracy_min_matches_enter: 8.0 # mean matches per registered frame
+    degeneracy_min_matches_exit: 12.0
+    degeneracy_min_frames: 5          # fewer registered frames in the window: not judged (start-up)
+
     # Odometry message covariance
     covariance_from_registration: false
     covariance_scale: 1.0

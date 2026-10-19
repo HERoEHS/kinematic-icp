@@ -23,6 +23,7 @@
 #pragma once
 
 #include "kinematic_icp/pipeline/KinematicICP.hpp"
+#include "kinematic_icp/registration/Degeneracy.hpp"
 #include "kinematic_icp_ros/utils/TimeStampHandler.hpp"
 
 // ROS 2 C
@@ -31,6 +32,7 @@
 #include <tf2_ros/transform_listener.h>
 
 // ROS 2 C++
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/time.hpp>
@@ -86,6 +88,8 @@ private:
     void UpdateCorrection(const builtin_interfaces::msg::Time &stamp);
     void PublishCorrectionTf();
     void RepublishCorrectedOdometry(const nav_msgs::msg::Odometry::ConstSharedPtr &msg);
+    /// ALICE M2: lidar degeneracy of the last frames, see degeneracy_ below.
+    void UpdateDegeneracy(const builtin_interfaces::msg::Time &stamp, bool registered);
 
     /// Tools for broadcasting TFs.
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -135,6 +139,15 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr kpoints_publisher_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr voxel_grid_pub_;
+
+    /// ALICE M2: whether the lidar pins the position in every direction (corridor, open
+    /// space), from the scan-only registration information of the last
+    /// degeneracy_window seconds (cpp/kinematic_icp/registration/Degeneracy.hpp).
+    /// Published every processed frame on "degeneracy" as a DiagnosticArray: level WARN
+    /// while degenerate, STALE before the first registered frame.
+    std::unique_ptr<kinematic_icp::LidarDegeneracy> degeneracy_;
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr degeneracy_pub_;
+    bool degeneracy_reported_{false};  // last state logged (changes go to the log)
 
     /// SetPose service
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr set_pose_srv_;

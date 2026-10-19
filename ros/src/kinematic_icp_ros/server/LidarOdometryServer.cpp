@@ -27,6 +27,8 @@
 #include <Eigen/LU>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <sophus/se3.hpp>
@@ -156,6 +158,20 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
     covariance_from_registration_ =
         node->declare_parameter<bool>("covariance_from_registration", covariance_from_registration_);
     covariance_scale_ = node->declare_parameter<double>("covariance_scale", covariance_scale_);
+    kinematic_icp::DegeneracyOptions degeneracy;
+    degeneracy.window = node->declare_parameter<double>("degeneracy_window", degeneracy.window);
+    degeneracy.ratio_enter =
+        node->declare_parameter<double>("degeneracy_ratio_enter", degeneracy.ratio_enter);
+    degeneracy.ratio_exit =
+        node->declare_parameter<double>("degeneracy_ratio_exit", degeneracy.ratio_exit);
+    degeneracy.min_matches_enter = node->declare_parameter<double>(
+        "degeneracy_min_matches_enter", degeneracy.min_matches_enter);
+    degeneracy.min_matches_exit = node->declare_parameter<double>(
+        "degeneracy_min_matches_exit", degeneracy.min_matches_exit);
+    degeneracy.min_frames = static_cast<std::size_t>(std::max<int64_t>(
+        1, node->declare_parameter<int64_t>("degeneracy_min_frames",
+                                            static_cast<int64_t>(degeneracy.min_frames))));
+    degeneracy_ = std::make_unique<kinematic_icp::LidarDegeneracy>(degeneracy);
     publish_correction_tf_ =
         node->declare_parameter<bool>("publish_correction_tf", publish_correction_tf_);
     correction_tf_rate_ = node->declare_parameter<double>("correction_tf_rate", correction_tf_rate_);
@@ -193,6 +209,10 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
     // ALICE M2: per-frame registration diagnostics, layout in RegisterFrame().
     registration_debug_pub_ =
         node_->create_publisher<std_msgs::msg::Float64MultiArray>("registration_debug", qos);
+    // ALICE M2: lidar degeneracy, see UpdateDegeneracy(). Published every frame (no
+    // subscriber check) so a consumer can tell a silent odometry from a quiet scene.
+    degeneracy_pub_ =
+        node_->create_publisher<diagnostic_msgs::msg::DiagnosticArray>("degeneracy", qos);
 
     set_pose_srv_ = node_->create_service<std_srvs::srv::Trigger>(
         "set_pose", [&](const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
@@ -482,6 +502,9 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     // ALICE M2: correction mode
     if (publish_correction_tf_ || corrected_odometry_pub_) UpdateCorrection(end_odom_query);
 
+    // ALICE M2: lidar degeneracy over the last frames
+    UpdateDegeneracy(end_odom_query, registered);
+
     // Spit the current estimated pose to ROS pc_out_msgs handling the desired target frame
     PublishOdometryMsg(kinematic_icp_->pose(), velocity);
 }
@@ -577,6 +600,86 @@ void LidarOdometryServer::PublishClouds(const std::vector<Eigen::Vector3d> frame
     if (map_publisher_->get_subscription_count() > 0) {
         map_publisher_->publish(
             std::move(EigenToPointCloud2(kinematic_icp_->LocalMap(), map_header)));
+    }
+}
+
+void LidarOdometryServer::UpdateDegeneracy(const builtin_interfaces::msg::Time &stamp,
+                                           const bool registered) {
+    // Only the holonomic registration fills the diagnostics. A frame skipped because
+    // the robot stood still adds nothing: the window keeps describing the last place.
+    if (registered && config_.holonomic) {
+        const auto &diag = kinematic_icp_->LastRegistrationDiagnostics();
+        // Scan-only part: the odometry term Omega is diagonal.
+        Eigen::Matrix3d per_match = diag.information;
+        per_match.diagonal() -= diag.omega_diagonal;
+        const double sigma = config_.odometry_prior ? config_.point_sigma
+                                                    : std::sqrt(diag.mean_squared_residual);
+        const Eigen::Matrix3d R = kinematic_icp_->pose().so3().matrix();
+        degeneracy_->AddFrame(timestamps_handler_.toTime(stamp), std::atan2(R(1, 0), R(0, 0)),
+                              per_match, diag.num_correspondences, sigma);
+    }
+    const auto &state = degeneracy_->state();
+
+    diagnostic_msgs::msg::DiagnosticArray msg;
+    msg.header.stamp = stamp;
+    msg.header.frame_id = lidar_odom_frame_;
+    diagnostic_msgs::msg::DiagnosticStatus status;
+    status.name = "kinematic_icp: lidar degeneracy";
+    status.hardware_id = lidar_odom_frame_;  // weak_axis_deg is in this frame
+    char text[160];
+    if (degeneracy_->Empty()) {
+        status.level = diagnostic_msgs::msg::DiagnosticStatus::STALE;
+        status.message = "no registered frame yet";
+    } else if (!state.judged) {
+        status.level = diagnostic_msgs::msg::DiagnosticStatus::STALE;
+        std::snprintf(text, sizeof(text), "too few registered frames to judge (%zu)", state.frames);
+        status.message = text;
+    } else if (!state.degenerate) {
+        status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+        status.message = "lidar fixes the position";
+    } else if (state.reason == kinematic_icp::DegeneracyReason::kSparse) {
+        status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+        std::snprintf(text, sizeof(text), "sparse: %.1f matches per frame, position from odometry only",
+                      state.matches_per_frame);
+        status.message = text;
+    } else {
+        status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+        std::snprintf(text, sizeof(text), "corridor: position along %.0f deg from odometry only",
+                      degeneracy_->WeakAxisDegrees());
+        status.message = text;
+    }
+    auto value = [&status](const std::string &key, const std::string &v) {
+        diagnostic_msgs::msg::KeyValue kv;
+        kv.key = key;
+        kv.value = v;
+        status.values.push_back(kv);
+    };
+    auto number = [&value](const std::string &key, const double v) {
+        char buffer[32];
+        std::snprintf(buffer, sizeof(buffer), "%.6g", v);
+        value(key, buffer);
+    };
+    value("degenerate", state.degenerate ? "true" : "false");
+    value("reason", kinematic_icp::ToString(state.reason));
+    number("ratio", state.ratio);
+    number("weak_axis_deg", degeneracy_->WeakAxisDegrees());
+    number("sigma_weak", state.sigma_weak);
+    number("sigma_strong", state.sigma_strong);
+    number("sigma_yaw", state.sigma_yaw);
+    number("matches_per_frame", state.matches_per_frame);
+    number("frames", static_cast<double>(state.frames));
+    msg.status.push_back(status);
+    degeneracy_pub_->publish(msg);
+
+    if (state.judged && state.degenerate != degeneracy_reported_) {
+        degeneracy_reported_ = state.degenerate;
+        if (state.degenerate) {
+            RCLCPP_INFO(node_->get_logger(), "Lidar degenerate (%s, ratio %.3f, %.1f matches per frame)",
+                        status.message.c_str(), state.ratio, state.matches_per_frame);
+        } else {
+            RCLCPP_INFO(node_->get_logger(), "Lidar fixes the position again (ratio %.3f)",
+                        state.ratio);
+        }
     }
 }
 

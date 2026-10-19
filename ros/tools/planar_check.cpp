@@ -24,6 +24,7 @@
 #include <sophus/se3.hpp>
 
 #include "kinematic_icp/pipeline/KinematicICP.hpp"
+#include "kinematic_icp/registration/Degeneracy.hpp"
 
 namespace {
 
@@ -180,6 +181,12 @@ void Run(const char *name, const std::vector<Seg> &world, const std::vector<Phas
 
     std::vector<Pose2> gt, est, prior;
     std::vector<int> frame_phase;
+    // Lidar degeneracy as the ROS server judges it (defaults; the window holds 10
+    // frames of this single 10 Hz lidar): share of frames flagged per phase.
+    kinematic_icp::LidarDegeneracy degeneracy;
+    std::vector<int> degenerate_frames(phases.size(), 0), phase_frames(phases.size(), 0);
+    // Weak axis averaged as an undirected angle (doubled-angle mean, 0 and 180 alike).
+    std::vector<Eigen::Vector2d> weak_axis_sum(phases.size(), Eigen::Vector2d::Zero());
     Pose2 prior_pose = P.front();
     double t_reg = 0.0;
     int frames = 0;
@@ -212,6 +219,21 @@ void Run(const char *name, const std::vector<Seg> &world, const std::vector<Phas
         kicp.RegisterFrame(pts, stamps, lidar_to_base, delta);
         t_reg += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         ++frames;
+        if (cfg.holonomic) {
+            const auto &diag = kicp.LastRegistrationDiagnostics();
+            Eigen::Matrix3d per_match = diag.information;
+            per_match.diagonal() -= diag.omega_diagonal;
+            const double sigma = cfg.odometry_prior ? cfg.point_sigma : std::sqrt(diag.mean_squared_residual);
+            degeneracy.AddFrame(frames * scan_period, FromSE3(kicp.pose()).th, per_match,
+                                diag.num_correspondences, sigma);
+            const int ph = phase_of_step[k];
+            ++phase_frames[ph];
+            if (degeneracy.state().degenerate) {
+                ++degenerate_frames[ph];
+                const double a2 = 2.0 * degeneracy.WeakAxisDegrees() * M_PI / 180.0;
+                weak_axis_sum[ph] += Eigen::Vector2d(std::cos(a2), std::sin(a2));
+            }
+        }
 
         gt.push_back(P[k]);
         est.push_back(FromSE3(kicp.pose()));
@@ -226,10 +248,20 @@ void Run(const char *name, const std::vector<Seg> &world, const std::vector<Phas
                                : (cfg.odometry_prior ? (cfg.point_to_line ? "HOLONOMIC prior p2l" : "HOLONOMIC prior")
                                                      : "HOLONOMIC damping"),
                 frames, 1e3 * t_reg / frames);
-    std::printf("  %-14s | %-22s | %-22s\n", "phase end", "prior: pos[cm] yaw[deg]", "kicp: pos[cm] yaw[deg]");
+    std::printf("  %-14s | %-22s | %-22s | %s\n", "phase end", "prior: pos[cm] yaw[deg]", "kicp: pos[cm] yaw[deg]",
+                "lidar degenerate [%] (weak axis [deg])");
     for (int p = 0; p < np; ++p) {
-        std::printf("  %-14s | %10.1f %10.2f | %10.1f %10.2f\n", phases[p].name, 100 * rp.phase_end_pos[p],
+        std::printf("  %-14s | %10.1f %10.2f | %10.1f %10.2f", phases[p].name, 100 * rp.phase_end_pos[p],
                     rp.phase_end_yaw[p], 100 * re.phase_end_pos[p], re.phase_end_yaw[p]);
+        if (phase_frames[p] > 0) {
+            std::printf(" | %5.0f", 100.0 * degenerate_frames[p] / phase_frames[p]);
+            if (degenerate_frames[p] > 0) {
+                double axis = 0.5 * std::atan2(weak_axis_sum[p].y(), weak_axis_sum[p].x()) * 180.0 / M_PI;
+                if (axis < 0.0) axis += 180.0;
+                std::printf(" (%.0f)", axis);
+            }
+        }
+        std::printf("\n");
     }
     std::printf("  %-14s | %10.1f %10.2f | %10.1f %10.2f\n", "FINAL", 100 * rp.final_pos, rp.final_yaw,
                 100 * re.final_pos, re.final_yaw);
