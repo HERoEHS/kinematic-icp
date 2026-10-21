@@ -54,6 +54,8 @@ SOFTWARE.
   <depend>tbb</depend>
 
   <exec_depend>ros2launch</exec_depend>
+  <!-- launch/alice_m2_odometry.launch.py 가 EKF(ekf_node)와 params/alice_m2/wio_ekf.yaml 을 쓴다 -->
+  <exec_depend>robot_localization</exec_depend>
 
 
   <export>
