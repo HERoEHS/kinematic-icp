@@ -119,7 +119,8 @@ KinematicICP::Vector3dVectorTuple KinematicICP::RegisterFrame(
     const Sophus::SE3d &lidar_to_base,
     const Sophus::SE3d &relative_odometry,
     const Sophus::SE3d &deskew_motion,
-    const int sensor) {
+    const int sensor,
+    const bool update_map) {
     // Need to deskew in lidar frame
     const Sophus::SE3d &deskew_motion_in_lidar =
         lidar_to_base.inverse() * deskew_motion * lidar_to_base;
@@ -166,6 +167,19 @@ KinematicICP::Vector3dVectorTuple KinematicICP::RegisterFrame(
 
     // Compute the difference between the prediction and the actual estimate
     const auto odometry_error = (last_pose_ * relative_odometry).inverse() * new_pose;
+
+    // ALICE M2: standing, the frame only corrects the pose. Added to the map at a pose
+    // still slightly off, its points sit next to the ones already there and are the
+    // nearest ones next time, so the map followed the odometry drift: standing 16 min in
+    // Isaac (EKF heading drifting 40 deg) the pose went 11 deg off with the frames added
+    // and 0.9 deg without (2026-10-26). The odometry error of a standing frame is no
+    // sample of the motion error the threshold models. An empty map (standing since the
+    // start) still takes the frame, or nothing would check the pose before the robot
+    // first moves.
+    if (!update_map && !local_map_.Empty()) {
+        last_pose_ = new_pose;
+        return {preprocessed_frame_in_base, source};
+    }
 
     // Update step: threshold, local map and the last pose
     correspondence_threshold_.UpdateOdometryError(odometry_error);

@@ -115,6 +115,10 @@ private:
     /// velocity published with it (kept for a frame right after the other lidar).
     int last_sensor_{-1};
     Sophus::SE3d::Tangent last_velocity_{Sophus::SE3d::Tangent::Zero()};
+    /// ALICE M2: odometry increments carried without registration while the robot stood
+    /// (see RegisterFrame). Once the sum passes the threshold the frame is registered, so
+    /// what the odometry drifts by standing is still checked against the scans.
+    Sophus::SE3d unregistered_motion_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr registration_debug_pub_;
     /// ALICE M2 correction mode. Instead of a second pose frame (base -> odom_lidar),
     /// publish only the lidar correction as lidar_odom_frame -> wheel_odom_frame

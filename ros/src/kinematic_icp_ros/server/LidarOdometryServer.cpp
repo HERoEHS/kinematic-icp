@@ -418,22 +418,53 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     const bool moved_since_last = delta.log().norm() > 1e-3;
     const bool same_instant = other_lidar && end_time == previous_time;
     const bool moved_in_scan = same_instant && deskew_delta.log().norm() > 1e-3;
-    if (moved_since_last || moved_in_scan) {
+    // ALICE M2: increments below the threshold used to be carried for good, so whatever
+    // the odometry drifted by while the robot stood (gyro bias walk, slow slip) was never
+    // checked against the scans: standing 7 min in Isaac took the pose 2.5 deg and 0.4 m
+    // off with the correction frozen (2026-10-26). Standing (below 5 mm/s and 0.3 deg/s
+    // since the frame processed last), sum the carried increments and register once the
+    // sum passes the threshold. Only standing: summing slow motion too (starting,
+    // stopping, slow turns) moved the robot bags by up to 6 cm and 2.9 deg and the
+    // tape-measured end errors got worse on four of six. Slow motion is carried as before
+    // and empties the sum. Judged on speed, not on the increment: the simulated EKF
+    // jitters ~0.6 mm/s standing and its lidar frames are 100 ms apart, so 1e-4 per frame
+    // emptied the sum every few frames. A frame of the other lidar a few ms after the last
+    // one says nothing about speed and leaves the sum. The carried increments are already
+    // in the pose, so the registration still gets this frame's increment; the scans then
+    // take out what the carried odometry got wrong. Such a frame is not added to the local
+    // map (KinematicICP::RegisterFrame, update_map).
+    const double frame_dt =
+        timestamps_handler_.toTime(end_odom_query) - timestamps_handler_.toTime(begin_odom_query);
+    const Sophus::SE3d::Tangent step = delta.log();
+    const bool too_close = same_instant || frame_dt < 0.03;
+    const bool standing = !too_close && step.head<3>().norm() < 0.005 * frame_dt &&
+                          step.tail<3>().norm() < 0.3 * M_PI / 180.0 * frame_dt;
+    const bool accumulated = standing && !moved_since_last &&
+                             (unregistered_motion_ * delta).log().norm() > 1e-3;
+    if (moved_since_last || moved_in_scan || accumulated) {
         const auto points = PointCloud2ToEigen(msg, {});
-        const auto &[frame, kpoints] = kinematic_icp_->RegisterFrame(points, timestamps, extrinsic,
-                                                                     delta, deskew_delta, sensor);
+        // Standing, the frame only corrects the pose; the local map is left as it is.
+        const auto &[frame, kpoints] = kinematic_icp_->RegisterFrame(
+            points, timestamps, extrinsic, delta, deskew_delta, sensor, !accumulated);
         PublishClouds(frame, kpoints);
         registered = true;
+        unregistered_motion_ = Sophus::SE3d();
     } else {
         // ALICE M2: upstream dropped such small increments entirely, so a robot
         // creeping at < 1 mm per frame (two lidars: 20 frames/s) did not move at all
         // in odom_lidar. Carry the odometry increment; the map is not updated.
         kinematic_icp_->pose() = prior_pose;
+        // Standing adds to the sum, slow motion empties it, a frame too close to the last
+        // one (the other lidar) leaves it.
+        if (standing) {
+            unregistered_motion_ = unregistered_motion_ * delta;
+        } else if (!too_close) {
+            unregistered_motion_ = Sophus::SE3d();
+        }
     }
 
     // Compute velocities, use the elapsed time between the current msg and the last received
-    const double elapsed_time =
-        timestamps_handler_.toTime(end_odom_query) - timestamps_handler_.toTime(begin_odom_query);
+    const double elapsed_time = frame_dt;
     const Sophus::SE3d::Tangent delta_twist = (last_pose.inverse() * kinematic_icp_->pose()).log();
     // ALICE M2: no time since the frame before (the other lidar at the same instant), so
     // no interval to divide by: keep the last velocity.
@@ -474,6 +505,7 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     //   order so far  15 lidar index by frame (0 first seen, 1 second, ...)  16 points
     //   left out as moving with the robot (moving_object_filter)  17 the other lidar
     //   ended at the same instant just before (0/1; registered when moving, see above)
+    //   18 registered only because the carried increments added up (0/1, see above)
     if (registration_debug_pub_->get_subscription_count() > 0) {
         std_msgs::msg::Float64MultiArray dbg;
         const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(diag.information);
@@ -495,15 +527,18 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
                     static_cast<double>(frames_skipped_out_of_order_),
                     static_cast<double>(sensor),
                     registered ? static_cast<double>(kinematic_icp_->LastNumMovingPoints()) : 0.0,
-                    same_instant ? 1.0 : 0.0};
+                    same_instant ? 1.0 : 0.0,
+                    accumulated ? 1.0 : 0.0};
         registration_debug_pub_->publish(dbg);
     }
 
     // ALICE M2: correction mode
     if (publish_correction_tf_ || corrected_odometry_pub_) UpdateCorrection(end_odom_query);
 
-    // ALICE M2: lidar degeneracy over the last frames
-    UpdateDegeneracy(end_odom_query, registered);
+    // ALICE M2: lidar degeneracy over the last frames. A frame registered only because the
+    // carried increments added up is left out, like the skipped ones before: standing, the
+    // window keeps describing the last place instead of one lone frame (not judged).
+    UpdateDegeneracy(end_odom_query, registered && !accumulated);
 
     // Spit the current estimated pose to ROS pc_out_msgs handling the desired target frame
     PublishOdometryMsg(kinematic_icp_->pose(), velocity);

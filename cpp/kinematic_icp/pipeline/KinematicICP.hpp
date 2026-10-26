@@ -152,13 +152,16 @@ public:
     // (the initial guess); deskew_motion is the robot motion over this scan's own
     // time span (first to last point, timestamps normalized to it). They coincide
     // for one continuously spinning lidar; with two lidars interleaved they do not.
-    // sensor tells the lidars apart for moving_object_filter.
+    // sensor tells the lidars apart for moving_object_filter. update_map false (ALICE M2,
+    // the robot stands): the frame only corrects the pose against the local map; the
+    // map, the adaptive threshold and the moving-object history stay as they are.
     Vector3dVectorTuple RegisterFrame(const std::vector<Eigen::Vector3d> &frame,
                                       const std::vector<double> &timestamps,
                                       const Sophus::SE3d &lidar_to_base,
                                       const Sophus::SE3d &relative_odometry,
                                       const Sophus::SE3d &deskew_motion,
-                                      const int sensor = 0);
+                                      const int sensor = 0,
+                                      const bool update_map = true);
 
     const RegistrationDiagnostics &LastRegistrationDiagnostics() const {
         return registration_.diagnostics();
