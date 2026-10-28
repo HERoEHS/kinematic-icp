@@ -47,6 +47,14 @@
     correction_tf_post_date: 0.05 # [s]
     corrected_odometry_input_topic: /odometry/ekf
     corrected_odometry_output_topic: /odometry/filtered
+    # Standing frames are still checked against the scans (LidarOdometryServer::RegisterFrame).
+    # The prior's heading is the gyro alone, so a turn it shows while the robot does not move
+    # counts only if these wheels turn too, once kept up 0.5 s. Robot 2026-10-28 (KG): the
+    # gyro read +0.5 deg/s for 3 to 7 s at a time while the base stood or crept (lidar and
+    # wheels 0 deg/s), carried as slow motion: heading 11 deg off. Offline, heading against
+    # the map: max 11.5 -> 8.6 deg, end 11.1 -> 6.3 deg; the 1001/1002 tape bags unchanged
+    # (no frame affected, 4.73 cm). Empty: the prior alone.
+    standing_odometry_topic: /aeirobot/alice_mobile/odom
     # The prior and the deskew motion are looked up at the scan end; give the EKF
     # TF this long to arrive (upstream uses 0 on hardware, i.e. identity on a miss).
     tf_timeout: 0.05

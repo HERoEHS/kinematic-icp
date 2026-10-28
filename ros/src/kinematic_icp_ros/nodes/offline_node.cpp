@@ -33,6 +33,7 @@
 
 // ROS
 #include <laser_geometry/laser_geometry.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/node.hpp>
 #include <rclcpp/node_options.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
@@ -86,6 +87,10 @@ OfflineNode::OfflineNode(const rclcpp::NodeOptions &options) {
     output_pose_file_ = std::filesystem::path(node_->declare_parameter<std::string>("output_dir"));
     output_pose_file_ /= poses_filename;
     auto tf_bridge = std::make_shared<BufferableBag::TFBridge>(node_);
+    // ALICE M2: the wheel odometry for standing comes from the bag too, in bag order.
+    if (!odometry_server_->standing_odometry_topic().empty()) {
+        topics.push_back(odometry_server_->standing_odometry_topic());
+    }
     bag_multiplexer_.AddBag(BufferableBag(bag_filename, tf_bridge, topics));
 }
 
@@ -137,34 +142,41 @@ void OfflineNode::Run() {
         }
         return projected_scan;
     };
-    // Deserialize the next pointcloud message from the bagfiles
-    auto GetNextMsg = [&] {
+    // Deserialize a pointcloud message from the bagfiles
+    auto ToCloud = [&](const rosbag2_storage::SerializedBagMessage &msg) {
+        rclcpp::SerializedMessage serialized_msg(*msg.serialized_data);
         if (use_2d_lidar_) {
             const rclcpp::Serialization<sensor_msgs::msg::LaserScan> serializer;
             const auto lidar_msg = std::make_shared<sensor_msgs::msg::LaserScan>();
-            const auto &msg = bag_multiplexer_.GetNextMessage();
-            rclcpp::SerializedMessage serialized_msg(*msg.serialized_data);
             serializer.deserialize_message(&serialized_msg, lidar_msg.get());
             return lidar2d_to_3d(lidar_msg);
         } else {
             const rclcpp::Serialization<sensor_msgs::msg::PointCloud2> serializer;
             const auto lidar_msg = std::make_shared<sensor_msgs::msg::PointCloud2>();
-            const auto &msg = bag_multiplexer_.GetNextMessage();
-            rclcpp::SerializedMessage serialized_msg(*msg.serialized_data);
             serializer.deserialize_message(&serialized_msg, lidar_msg.get());
             return lidar_msg;
         }
     };
+    const auto &standing_topic = odometry_server_->standing_odometry_topic();
+    const rclcpp::Serialization<nav_msgs::msg::Odometry> odometry_serializer;
 
     // This is the main blocking loop that this simulates the subscription form the online node,
     // but instead of fetching the data from a topic, it does it from the provided bagfiles
     while (rclcpp::ok() && bag_multiplexer_.IsMessageAvailable()) {
-        const auto msg = GetNextMsg();
-        odometry_server_->RegisterFrame(msg);
+        const auto bag_msg = bag_multiplexer_.GetNextMessage();
+        bar.tick();
+        // ALICE M2: the wheel odometry for standing is no frame (see the constructor).
+        if (!standing_topic.empty() && bag_msg.topic_name == standing_topic) {
+            nav_msgs::msg::Odometry odometry;
+            rclcpp::SerializedMessage serialized_msg(*bag_msg.serialized_data);
+            odometry_serializer.deserialize_message(&serialized_msg, &odometry);
+            odometry_server_->AddStandingOdometry(odometry);
+            continue;
+        }
+        odometry_server_->RegisterFrame(ToCloud(bag_msg));
         const auto &stamp = odometry_server_->timestamps_handler_.last_processed_stamp_;
         poses_with_timestamps_.emplace_back(stamp.sec + stamp.nanosec * 1e-9,
                                             odometry_server_->kinematic_icp_->pose());
-        bar.tick();
     }
     bar.mark_as_completed();
 }

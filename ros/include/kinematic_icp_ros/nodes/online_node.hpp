@@ -28,6 +28,7 @@
 
 // ROS
 #include <laser_geometry/laser_geometry.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/node.hpp>
 #include <rclcpp/parameter_client.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
@@ -58,6 +59,8 @@ private:
     // ALICE M2: one subscription per entry of lidar_topics (several 2D lidars).
     std::vector<rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr> laser_scan_subs_;
     std::vector<rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr> pointcloud_subs_;
+    // ALICE M2: wheel odometry for telling standing (LidarOdometryServer standing_odometry_topic).
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr standing_odometry_sub_;
     // ALICE M2: beam time from angle (utils::RetimeLaserCloudFromAngle).
     bool laser_time_from_angle_{false};
     double laser_time_origin_rad_{0.0};

@@ -45,11 +45,13 @@
 
 // STL
 #include <chrono>
+#include <deque>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kinematic_icp_ros {
@@ -68,6 +70,12 @@ public:
     void SetLidarBlindSectors(const std::string &frame_id,
                               const std::vector<double> &sectors_deg,
                               const std::string &source);
+    /// ALICE M2: the odometry whose yaw rate overrules a turn of the prior when telling
+    /// standing from slow motion (the wheels, standing_odometry_topic; empty: the prior
+    /// alone). The online node subscribes to it and the offline node reads it from the bag;
+    /// both hand it over here.
+    const std::string &standing_odometry_topic() const { return standing_odometry_topic_; }
+    void AddStandingOdometry(const nav_msgs::msg::Odometry &msg);
     std::unique_ptr<kinematic_icp::pipeline::KinematicICP> kinematic_icp_;
     utils::TimeStampHandler timestamps_handler_;
 
@@ -119,6 +127,15 @@ private:
     /// (see RegisterFrame). Once the sum passes the threshold the frame is registered, so
     /// what the odometry drifts by standing is still checked against the scans.
     Sophus::SE3d unregistered_motion_;
+    /// ALICE M2: whether the wheels (standing_odometry_topic_) turn over [begin, end], asked
+    /// when the prior turns but does not move (see RegisterFrame). 1 turning, 0 not turning,
+    /// -1 no sample around the frame or no topic (the prior decides).
+    int WheelsTurning(double begin, double end) const;
+    std::string standing_odometry_topic_;
+    std::deque<std::pair<double, double>> standing_rates_;  // stamp [s], |yaw rate| [rad/s], last 2 s
+    /// Since when the gyro alone turns, and its last frame (-1: it does not) [s].
+    double gyro_only_turn_since_{-1.0};
+    double gyro_only_turn_last_{-1.0};
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr registration_debug_pub_;
     /// ALICE M2 correction mode. Instead of a second pose frame (base -> odom_lidar),
     /// publish only the lidar correction as lidar_odom_frame -> wheel_odom_frame

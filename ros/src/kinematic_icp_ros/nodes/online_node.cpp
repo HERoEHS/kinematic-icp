@@ -93,6 +93,16 @@ OnlineNode ::OnlineNode(const rclcpp::NodeOptions &options) {
                 }));
         }
     }
+    // ALICE M2: the wheel odometry whose yaw rate overrules a gyro turn when telling
+    // standing from slow motion (standing_odometry_topic, 50 Hz on the robot).
+    const auto &standing_topic = odometry_server_->standing_odometry_topic();
+    if (!standing_topic.empty()) {
+        standing_odometry_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+            standing_topic, rclcpp::SensorDataQoS().keep_last(50),
+            [this](const nav_msgs::msg::Odometry::ConstSharedPtr &msg) {
+                odometry_server_->AddStandingOdometry(*msg);
+            });
+    }
 }
 
 void OnlineNode::QueryDriverBlindSectors(const std::size_t index, const std::string &frame_id) {

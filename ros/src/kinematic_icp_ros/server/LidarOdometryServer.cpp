@@ -58,6 +58,13 @@ namespace {
 using milliseconds = std::chrono::milliseconds;
 using seconds = std::chrono::duration<long double>;
 using std::chrono::duration_cast;
+// ALICE M2: below these the robot stands (RegisterFrame).
+constexpr double kStandingSpeed = 0.005;              // [m/s]
+constexpr double kStandingRate = 0.3 * M_PI / 180.0;  // [rad/s]
+// ALICE M2: a turn of the gyro alone counts as no turn once kept up this long, gaps up to
+// kGyroOnlyTurnGap allowed (RegisterFrame, standing_odometry_topic).
+constexpr double kGyroOnlyTurnTime = 0.5;  // [s]
+constexpr double kGyroOnlyTurnGap = 0.5;   // [s]
 }  // namespace
 
 namespace kinematic_icp_ros {
@@ -181,6 +188,8 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
         "corrected_odometry_input_topic", corrected_odometry_input_topic_);
     corrected_odometry_output_topic_ = node->declare_parameter<std::string>(
         "corrected_odometry_output_topic", corrected_odometry_output_topic_);
+    standing_odometry_topic_ =
+        node->declare_parameter<std::string>("standing_odometry_topic", standing_odometry_topic_);
     if (publish_correction_tf_ && publish_odom_tf_) {
         // base -> lidar_odom_frame plus lidar_odom_frame -> wheel_odom_frame would close
         // a loop in the TF tree.
@@ -246,6 +255,11 @@ LidarOdometryServer::LidarOdometryServer(rclcpp::Node::SharedPtr node) : node_(n
         RCLCPP_INFO(node_->get_logger(), "Republishing %s as %s in frame %s",
                     corrected_odometry_input_topic_.c_str(), corrected_odometry_output_topic_.c_str(),
                     lidar_odom_frame_.c_str());
+    }
+    if (!standing_odometry_topic_.empty()) {
+        RCLCPP_INFO(node_->get_logger(),
+                    "Standing: a gyro turn the wheels (%s) do not show, kept up %.1f s, is no turn",
+                    standing_odometry_topic_.c_str(), kGyroOnlyTurnTime);
     }
 
     // Initialize the odometry and tf msg. Since tf by design does not allow for having two frames
@@ -437,8 +451,34 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
         timestamps_handler_.toTime(end_odom_query) - timestamps_handler_.toTime(begin_odom_query);
     const Sophus::SE3d::Tangent step = delta.log();
     const bool too_close = same_instant || frame_dt < 0.03;
-    const bool standing = !too_close && step.head<3>().norm() < 0.005 * frame_dt &&
-                          step.tail<3>().norm() < 0.3 * M_PI / 180.0 * frame_dt;
+    // ALICE M2: with standing_odometry_topic a turn the prior shows but the wheels do not,
+    // kept up for kGyroOnlyTurnTime, is no turn. The prior's heading is the gyro alone, and
+    // on the robot (2026-10-28) the gyro read about +0.5 deg/s for 3 to 7 s at a time while
+    // the base did not turn (lidar and wheels both 0 deg/s): judged on the prior that was
+    // slow motion, carried without a scan, and the heading went 11 deg off. Only the turn:
+    // the wheels' twist judging standing outright called standing frames moving on brief
+    // wheel spikes while steering (78 to 202 frames a bag). Only kept up: the gyro alone
+    // also turns for a frame or five when steering starts (crab_01, 0.8 to 1.6 deg/s, likely
+    // the base twisting), and registering those frames in the corridor cost 0.5 deg.
+    const double begin_time = timestamps_handler_.toTime(begin_odom_query);
+    const double end_time_s = timestamps_handler_.toTime(end_odom_query);
+    const bool prior_moves = step.head<3>().norm() >= kStandingSpeed * frame_dt;
+    const bool prior_turns = step.tail<3>().norm() >= kStandingRate * frame_dt;
+    const int wheels_turn =
+        too_close || prior_moves || !prior_turns ? -1 : WheelsTurning(begin_time, end_time_s);
+    const bool gyro_only_turn = wheels_turn == 0;
+    if (gyro_only_turn) {
+        // Frames in between that move, turn on the wheels too or turn below the rate do not
+        // end it (the robot drift had a few of each every second); kGyroOnlyTurnGap without a
+        // gyro-only turn starts it over.
+        if (gyro_only_turn_since_ < 0.0 || begin_time - gyro_only_turn_last_ > kGyroOnlyTurnGap) {
+            gyro_only_turn_since_ = begin_time;
+        }
+        gyro_only_turn_last_ = end_time_s;
+    }
+    const bool kept_up =
+        gyro_only_turn && end_time_s - gyro_only_turn_since_ >= kGyroOnlyTurnTime;
+    const bool standing = !too_close && !prior_moves && (!prior_turns || kept_up);
     const bool accumulated = standing && !moved_since_last &&
                              (unregistered_motion_ * delta).log().norm() > 1e-3;
     if (moved_since_last || moved_in_scan || accumulated) {
@@ -506,6 +546,9 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
     //   left out as moving with the robot (moving_object_filter)  17 the other lidar
     //   ended at the same instant just before (0/1; registered when moving, see above)
     //   18 registered only because the carried increments added up (0/1, see above)
+    //   19 the wheels asked about a turn of the prior: 1 they turn, 0 they do not (standing
+    //   once kept up, kGyroOnlyTurnTime), -1 not asked (no turn, moving, no wheel sample or
+    //   no standing_odometry_topic)
     if (registration_debug_pub_->get_subscription_count() > 0) {
         std_msgs::msg::Float64MultiArray dbg;
         const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(diag.information);
@@ -528,7 +571,8 @@ void LidarOdometryServer::RegisterFrame(const sensor_msgs::msg::PointCloud2::Con
                     static_cast<double>(sensor),
                     registered ? static_cast<double>(kinematic_icp_->LastNumMovingPoints()) : 0.0,
                     same_instant ? 1.0 : 0.0,
-                    accumulated ? 1.0 : 0.0};
+                    accumulated ? 1.0 : 0.0,
+                    static_cast<double>(wheels_turn)};
         registration_debug_pub_->publish(dbg);
     }
 
@@ -716,6 +760,26 @@ void LidarOdometryServer::UpdateDegeneracy(const builtin_interfaces::msg::Time &
                         state.ratio);
         }
     }
+}
+
+void LidarOdometryServer::AddStandingOdometry(const nav_msgs::msg::Odometry &msg) {
+    const double stamp = rclcpp::Time(msg.header.stamp).seconds();
+    standing_rates_.emplace_back(stamp, std::abs(msg.twist.twist.angular.z));
+    while (standing_rates_.front().first < stamp - 2.0) standing_rates_.pop_front();
+}
+
+int LidarOdometryServer::WheelsTurning(const double begin, const double end) const {
+    if (standing_odometry_topic_.empty()) return -1;
+    // The samples over the frame and a wheel period beyond either end (50 Hz on the robot);
+    // any of them turning makes the frame turning.
+    constexpr double margin = 0.03;  // [s]
+    bool sampled = false;
+    for (const auto &[stamp, rate] : standing_rates_) {
+        if (stamp < begin - margin || stamp > end + margin) continue;
+        if (rate >= kStandingRate) return 1;
+        sampled = true;
+    }
+    return sampled ? 0 : -1;
 }
 
 }  // namespace kinematic_icp_ros
